@@ -46,7 +46,11 @@ export async function controlPlaneJson<T>(
   const res = await controlPlaneFetch(path, options);
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data?.ok === false) {
-    throw new Error(data?.detail || data?.message || 'control_plane_request_failed');
+    const fallback =
+      res.status === 429
+        ? 'control_plane_rate_limited'
+        : `control_plane_request_failed:${res.status || 'unknown'}`;
+    throw new Error(data?.detail || data?.message || fallback);
   }
   return data as T;
 }

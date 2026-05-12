@@ -91,6 +91,9 @@ export interface WormholeDmInviteExport {
   peer_id: string;
   trust_fingerprint: string;
   invite: WormholeDmInviteEnvelope;
+  prekey_publish_pending?: boolean;
+  prekey_registration?: Record<string, unknown>;
+  detail?: string;
 }
 
 export interface WormholeDmInviteImportResult {
@@ -100,6 +103,44 @@ export interface WormholeDmInviteImportResult {
   trust_level: string;
   detail?: string;
   contact: Record<string, unknown>;
+}
+
+export interface WormholeDmAddressRecord {
+  handle: string;
+  label: string;
+  issued_at: number;
+  expires_at: number;
+  max_uses: number;
+  use_count: number;
+  remaining_uses: number;
+  last_used_at: number;
+  expired: boolean;
+  exhausted: boolean;
+  revoked?: boolean;
+}
+
+export interface WormholeDmInviteHandlesResponse {
+  ok: boolean;
+  addresses: WormholeDmAddressRecord[];
+  detail?: string;
+}
+
+export interface WormholeDmInviteHandleRevokeResult {
+  ok: boolean;
+  handle: string;
+  revoked: boolean;
+  identity_removed?: boolean;
+  relay_removed?: boolean;
+  republished?: boolean;
+  detail?: string;
+}
+
+export interface WormholeDmInviteHandleUpdateResult {
+  ok: boolean;
+  handle: string;
+  label: string;
+  updated: boolean;
+  detail?: string;
 }
 
 export type WormholeDmInviteImportFailure = Partial<WormholeDmInviteImportResult> & {
@@ -939,10 +980,68 @@ export async function fetchWormholeIdentity(): Promise<WormholeIdentity> {
   return value;
 }
 
-export async function exportWormholeDmInvite(): Promise<WormholeDmInviteExport> {
-  return controlPlaneJson<WormholeDmInviteExport>('/api/wormhole/dm/invite', {
+export async function exportWormholeDmInvite(options: {
+  label?: string;
+  expiresInSeconds?: number;
+} = {}): Promise<WormholeDmInviteExport> {
+  const params = new URLSearchParams();
+  if (options.label?.trim()) {
+    params.set('label', options.label.trim());
+  }
+  if (options.expiresInSeconds && options.expiresInSeconds > 0) {
+    params.set('expires_in_s', String(Math.floor(options.expiresInSeconds)));
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  return controlPlaneJson<WormholeDmInviteExport>(`/api/wormhole/dm/invite${suffix}`, {
     requireAdminSession: false,
   });
+}
+
+export async function listWormholeDmInviteHandles(): Promise<WormholeDmInviteHandlesResponse> {
+  return controlPlaneJson<WormholeDmInviteHandlesResponse>('/api/wormhole/dm/invite/handles', {
+    requireAdminSession: false,
+  });
+}
+
+export async function revokeWormholeDmInviteHandle(
+  handle: string,
+): Promise<WormholeDmInviteHandleRevokeResult> {
+  const response = await controlPlaneFetch(
+    `/api/wormhole/dm/invite/handles/${encodeURIComponent(handle)}`,
+    {
+      method: 'DELETE',
+      requireAdminSession: false,
+    },
+  );
+  const data = (await response.json().catch(() => ({}))) as WormholeDmInviteHandleRevokeResult & {
+    message?: string;
+  };
+  if (!response.ok || data?.ok === false) {
+    throw new Error(String(data?.detail || data?.message || 'DM address revoke failed'));
+  }
+  return data;
+}
+
+export async function renameWormholeDmInviteHandle(
+  handle: string,
+  label: string,
+): Promise<WormholeDmInviteHandleUpdateResult> {
+  const response = await controlPlaneFetch(
+    `/api/wormhole/dm/invite/handles/${encodeURIComponent(handle)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label }),
+      requireAdminSession: false,
+    },
+  );
+  const data = (await response.json().catch(() => ({}))) as WormholeDmInviteHandleUpdateResult & {
+    message?: string;
+  };
+  if (!response.ok || data?.ok === false) {
+    throw new Error(String(data?.detail || data?.message || 'DM address label update failed'));
+  }
+  return data;
 }
 
 export async function importWormholeDmInvite(

@@ -11,6 +11,7 @@ import base64
 import hmac
 import hashlib
 import json
+import logging
 import secrets
 import time
 from typing import Any
@@ -50,6 +51,8 @@ PREKEY_LOOKUP_ROTATE_BEFORE_EXPIRES_S = 24 * 60 * 60
 PREKEY_LOOKUP_ROTATE_BEFORE_REMAINING_USES = 8
 PREKEY_LOOKUP_ROTATION_OVERLAP_S = 12 * 60 * 60
 PREKEY_LOOKUP_ROTATION_ACTIVE_CAP = 4
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_int(val, default=0) -> int:
@@ -107,6 +110,7 @@ def _default_identity() -> dict[str, Any]:
 def _prekey_lookup_handle_record(
     handle: str,
     *,
+    label: str = "",
     issued_at: int = 0,
     expires_at: int = 0,
     max_uses: int = 0,
@@ -125,6 +129,7 @@ def _prekey_lookup_handle_record(
     bounded_max_uses = max(1, _safe_int(max_uses or PREKEY_LOOKUP_HANDLE_MAX_USES, PREKEY_LOOKUP_HANDLE_MAX_USES))
     return {
         "handle": str(handle or "").strip(),
+        "label": str(label or "").strip()[:96],
         "issued_at": issued,
         "expires_at": bounded_expires_at,
         "max_uses": bounded_max_uses,
@@ -152,8 +157,10 @@ def _coerce_prekey_lookup_handle_record(
         max_uses = _safe_int(value.get("max_uses", PREKEY_LOOKUP_HANDLE_MAX_USES) or PREKEY_LOOKUP_HANDLE_MAX_USES)
         use_count = _safe_int(value.get("use_count", value.get("uses", 0)) or 0, 0)
         last_used_at = _safe_int(value.get("last_used_at", value.get("last_used", 0)) or 0, 0)
+        label = str(value.get("label", "") or "").strip()
         return _prekey_lookup_handle_record(
             handle,
+            label=label,
             issued_at=issued_at,
             expires_at=expires_at,
             max_uses=max_uses,
@@ -226,6 +233,23 @@ def _fresh_prekey_lookup_handle_record(*, now: int | None = None) -> dict[str, A
         use_count=0,
         last_used_at=0,
     )
+
+
+def _prekey_registration_failure_blocks_dm_invite(detail: str) -> bool:
+    """Only trust-root failures block address export; transport warm-up can finish later."""
+    lowered = str(detail or "").lower()
+    critical_markers = (
+        "root transparency",
+        "external root witness",
+        "stable root",
+        "witness threshold",
+        "witness finality",
+        "root manifest",
+        "root witness",
+        "manifest_fingerprint",
+        "policy fingerprint",
+    )
+    return any(marker in lowered for marker in critical_markers)
 
 
 def _bounded_lookup_handle_records(
@@ -884,6 +908,7 @@ def export_wormhole_dm_invite(*, label: str = "", expires_in_s: int = 0) -> dict
     existing_handles.append(
         _prekey_lookup_handle_record(
             lookup_handle,
+            label=str(label or "").strip(),
             issued_at=issued_at,
             expires_at=expires_at,
         )
@@ -920,14 +945,25 @@ def export_wormhole_dm_invite(*, label: str = "", expires_in_s: int = 0) -> dict
     except Exception:
         pass
 
+    prekey_registration: dict[str, Any] = {"ok": False, "detail": "prekey bundle publish not attempted"}
     try:
         from services.mesh.mesh_wormhole_prekey import register_wormhole_prekey_bundle
 
-        registered = register_wormhole_prekey_bundle()
-        if not registered.get("ok"):
-            return {"ok": False, "detail": str(registered.get("detail", "") or "prekey bundle registration failed")}
+        prekey_registration = register_wormhole_prekey_bundle()
+        if not prekey_registration.get("ok"):
+            detail = str(prekey_registration.get("detail", "") or "prekey bundle registration failed")
+            if _prekey_registration_failure_blocks_dm_invite(detail):
+                return {"ok": False, "detail": detail}
+            logger.warning(
+                "DM invite prekey publish pending: %s",
+                detail,
+            )
     except Exception as exc:
-        return {"ok": False, "detail": str(exc) or "prekey bundle registration failed"}
+        prekey_registration = {"ok": False, "detail": str(exc) or "prekey bundle registration failed"}
+        detail = str(prekey_registration.get("detail", "") or "")
+        if _prekey_registration_failure_blocks_dm_invite(detail):
+            return {"ok": False, "detail": detail}
+        logger.warning("DM invite prekey publish pending: %s", prekey_registration["detail"])
 
     invite_node_id, invite_public_key, invite_private_key = _generate_invite_signing_identity()
     payload = _attach_dm_invite_root_distribution(payload)
@@ -958,6 +994,8 @@ def export_wormhole_dm_invite(*, label: str = "", expires_in_s: int = 0) -> dict
         "peer_id": str(invite_node_id or ""),
         "trust_fingerprint": str(payload.get("identity_commitment", "") or ""),
         "invite": invite,
+        "prekey_publish_pending": not bool(prekey_registration.get("ok")),
+        "prekey_registration": prekey_registration,
     }
 
 
@@ -980,6 +1018,140 @@ def get_prekey_lookup_handle_records() -> list[dict[str, Any]]:
     ]
 
 
+def list_prekey_lookup_handle_records_for_ui(*, now: int | None = None) -> dict[str, Any]:
+    """Return shareable DM address records without exposing local identity secrets."""
+    current_time = _safe_int(now or time.time(), int(time.time()))
+    addresses: list[dict[str, Any]] = []
+    for record in get_prekey_lookup_handle_records():
+        handle = str(record.get("handle", "") or "").strip()
+        if not handle:
+            continue
+        expires_at = _effective_prekey_lookup_handle_expires_at(record)
+        max_uses = max(
+            1,
+            _safe_int(
+                record.get("max_uses", PREKEY_LOOKUP_HANDLE_MAX_USES) or PREKEY_LOOKUP_HANDLE_MAX_USES,
+                PREKEY_LOOKUP_HANDLE_MAX_USES,
+            ),
+        )
+        use_count = max(0, _safe_int(record.get("use_count", 0) or 0, 0))
+        addresses.append(
+            {
+                "handle": handle,
+                "label": str(record.get("label", "") or "").strip(),
+                "issued_at": _safe_int(record.get("issued_at", 0) or 0, 0),
+                "expires_at": expires_at,
+                "max_uses": max_uses,
+                "use_count": use_count,
+                "remaining_uses": max(0, max_uses - use_count),
+                "last_used_at": _safe_int(record.get("last_used_at", 0) or 0, 0),
+                "expired": bool(expires_at > 0 and current_time >= expires_at),
+                "exhausted": bool(use_count >= max_uses),
+            }
+        )
+    addresses.sort(key=lambda item: _safe_int(item.get("issued_at", 0) or 0, 0), reverse=True)
+    return {"ok": True, "addresses": addresses}
+
+
+def rename_prekey_lookup_handle(handle: str, label: str) -> dict[str, Any]:
+    """Rename an active invite-scoped DM lookup handle without changing the handle."""
+    lookup_handle = str(handle or "").strip()
+    next_label = str(label or "").strip()[:96]
+    if not lookup_handle:
+        return {"ok": False, "detail": "missing_lookup_handle"}
+
+    current_time = int(time.time())
+    data = read_wormhole_identity()
+    existing, _ = _normalize_prekey_lookup_handles(
+        data.get("prekey_lookup_handles", []),
+        fallback_issued_at=current_time,
+        now=current_time,
+    )
+    updated = False
+    next_records: list[dict[str, Any]] = []
+    for record in existing:
+        current = dict(record)
+        if str(current.get("handle", "") or "").strip() == lookup_handle:
+            current["label"] = next_label
+            updated = True
+        next_records.append(current)
+
+    if not updated:
+        return {
+            "ok": False,
+            "handle": lookup_handle,
+            "label": next_label,
+            "updated": False,
+            "detail": "lookup_handle_not_found",
+        }
+
+    normalized_records, _ = _normalize_prekey_lookup_handles(
+        next_records,
+        fallback_issued_at=current_time,
+        now=current_time,
+    )
+    _write_identity({"prekey_lookup_handles": normalized_records})
+    return {
+        "ok": True,
+        "handle": lookup_handle,
+        "label": next_label,
+        "updated": True,
+    }
+
+
+def revoke_prekey_lookup_handle(handle: str) -> dict[str, Any]:
+    """Revoke an invite-scoped DM lookup handle for future first-contact attempts."""
+    lookup_handle = str(handle or "").strip()
+    if not lookup_handle:
+        return {"ok": False, "detail": "missing_lookup_handle"}
+    current_time = int(time.time())
+    data = read_wormhole_identity()
+    existing, _ = _normalize_prekey_lookup_handles(
+        data.get("prekey_lookup_handles", []),
+        fallback_issued_at=current_time,
+        now=current_time,
+    )
+    next_records = [
+        dict(record)
+        for record in existing
+        if str(record.get("handle", "") or "").strip() != lookup_handle
+    ]
+    identity_removed = len(next_records) != len(existing)
+    if identity_removed:
+        _write_identity({"prekey_lookup_handles": next_records})
+
+    relay_removed = False
+    try:
+        from services.mesh.mesh_dm_relay import dm_relay
+
+        relay_removed = bool(dm_relay.unregister_prekey_lookup_alias(lookup_handle))
+    except Exception:
+        relay_removed = False
+
+    republished = False
+    detail = ""
+    if identity_removed:
+        try:
+            from services.mesh.mesh_wormhole_prekey import register_wormhole_prekey_bundle
+
+            registered = register_wormhole_prekey_bundle()
+            republished = bool(registered.get("ok"))
+            if not republished:
+                detail = str(registered.get("detail", "") or "prekey bundle republish failed")
+        except Exception as exc:
+            detail = str(exc) or "prekey bundle republish failed"
+
+    return {
+        "ok": True,
+        "handle": lookup_handle,
+        "revoked": bool(identity_removed or relay_removed),
+        "identity_removed": identity_removed,
+        "relay_removed": relay_removed,
+        "republished": republished,
+        "detail": detail,
+    }
+
+
 def record_prekey_lookup_handle_use(handle: str, *, now: int | None = None) -> dict[str, Any] | None:
     lookup_handle = str(handle or "").strip()
     if not lookup_handle:
@@ -999,6 +1171,7 @@ def record_prekey_lookup_handle_use(handle: str, *, now: int | None = None) -> d
         if str(current.get("handle", "") or "").strip() == lookup_handle:
             current = _prekey_lookup_handle_record(
                 lookup_handle,
+                label=str(current.get("label", "") or "").strip(),
                 issued_at=_safe_int(current.get("issued_at", 0) or 0, current_time),
                 expires_at=_safe_int(current.get("expires_at", 0) or 0, 0),
                 max_uses=_safe_int(current.get("max_uses", PREKEY_LOOKUP_HANDLE_MAX_USES) or PREKEY_LOOKUP_HANDLE_MAX_USES),
@@ -1129,6 +1302,7 @@ def maybe_rotate_prekey_lookup_handles(*, now: int | None = None) -> dict[str, A
         candidate_records.append(
             _prekey_lookup_handle_record(
                 old_handle,
+                label=str(record.get("label", "") or "").strip(),
                 issued_at=_safe_int(record.get("issued_at", 0) or 0, current_time),
                 expires_at=overlap_expires_at,
                 max_uses=_safe_int(record.get("max_uses", PREKEY_LOOKUP_HANDLE_MAX_USES) or PREKEY_LOOKUP_HANDLE_MAX_USES),

@@ -335,8 +335,16 @@ async def update_layers(update: LayerUpdate, request: Request):
         logger.info("AIS stream started (ship layer enabled)")
     from services.sigint_bridge import sigint_grid
     if old_mesh and not new_mesh:
-        sigint_grid.mesh.stop()
-        logger.info("Meshtastic MQTT bridge stopped (layer disabled)")
+        try:
+            from services.meshtastic_mqtt_settings import mqtt_bridge_enabled
+            keep_chat_running = mqtt_bridge_enabled()
+        except Exception:
+            keep_chat_running = False
+        if keep_chat_running:
+            logger.info("Meshtastic map layer disabled; MQTT bridge kept running for MeshChat")
+        else:
+            sigint_grid.mesh.stop()
+            logger.info("Meshtastic MQTT bridge stopped (layer disabled)")
     elif not old_mesh and new_mesh:
         try:
             from services.meshtastic_mqtt_settings import mqtt_bridge_enabled

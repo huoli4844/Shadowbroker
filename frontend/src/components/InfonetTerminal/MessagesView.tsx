@@ -6,7 +6,9 @@ import {
   Ban,
   Check,
   ChevronLeft,
+  Copy,
   Inbox,
+  KeyRound,
   Mail,
   PencilLine,
   RefreshCcw,
@@ -89,13 +91,18 @@ import {
 import {
   fetchWormholeStatus,
   fetchWormholeIdentity,
+  exportWormholeDmInvite,
   getWormholeDmInviteImportErrorResult,
   importWormholeDmInvite,
   isWormholeReady,
   isWormholeSecureRequired,
+  listWormholeDmInviteHandles,
   prepareWormholeInteractiveLane,
   issueWormholePairwiseAlias,
   openWormholeSenderSeal,
+  renameWormholeDmInviteHandle,
+  revokeWormholeDmInviteHandle,
+  type WormholeDmAddressRecord,
 } from '@/mesh/wormholeIdentityClient';
 import {
   updatePrivateDeliveryAction,
@@ -149,6 +156,23 @@ interface MailboxSnapshot {
   items: MailItem[];
 }
 
+interface LocalDmAddress {
+  id: string;
+  label: string;
+  handle: string;
+  peerId: string;
+  trustFingerprint: string;
+  inviteBlob: string;
+  createdAt: number;
+  revokedAt?: number;
+  expiresAt?: number;
+}
+
+interface LocalDmAddressSnapshot {
+  version: 1;
+  addresses: LocalDmAddress[];
+}
+
 interface ComposeDraft {
   recipient: string;
   subject: string;
@@ -177,6 +201,10 @@ function randomId(prefix: string): string {
 
 function mailboxStorageKey(scopeId: string): string {
   return `sb_infonet_mailbox_v1:${scopeId}`;
+}
+
+function dmAddressStorageKey(scopeId: string): string {
+  return `sb_infonet_dm_addresses_v1:${scopeId}`;
 }
 
 function sortMessages(items: MailItem[]): MailItem[] {
@@ -251,6 +279,63 @@ function saveMailbox(scopeId: string, items: MailItem[]): void {
   } catch {
     /* ignore */
   }
+}
+
+function loadDmAddresses(scopeId: string): LocalDmAddress[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(dmAddressStorageKey(scopeId));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as LocalDmAddressSnapshot;
+    if (parsed?.version !== STORAGE_VERSION || !Array.isArray(parsed.addresses)) {
+      return [];
+    }
+    return parsed.addresses
+      .filter((item) => item && typeof item.handle === 'string' && item.handle.trim())
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  } catch {
+    return [];
+  }
+}
+
+function saveDmAddresses(scopeId: string, addresses: LocalDmAddress[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const payload: LocalDmAddressSnapshot = {
+      version: STORAGE_VERSION,
+      addresses: addresses.slice(0, 32),
+    };
+    localStorage.setItem(dmAddressStorageKey(scopeId), JSON.stringify(payload));
+  } catch {
+    /* ignore */
+  }
+}
+
+function inviteLookupHandle(invite: Record<string, unknown> | undefined): string {
+  const payload = invite?.payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return '';
+  }
+  return String((payload as Record<string, unknown>).prekey_lookup_handle || '').trim();
+}
+
+function shortHandle(value: string): string {
+  const clean = String(value || '').trim();
+  if (clean.length <= 16) return clean;
+  return `${clean.slice(0, 8)}...${clean.slice(-6)}`;
+}
+
+function formatDmAddressDate(value?: number): string {
+  if (!value) return 'never';
+  try {
+    return new Date(value * 1000).toLocaleString();
+  } catch {
+    return String(value);
+  }
+}
+
+function dmAddressShareText(address: LocalDmAddress): string {
+  return String(address.handle || '').trim();
 }
 
 function encodeMailPayload(subject: string, body: string): string {
@@ -545,13 +630,18 @@ export default function MessagesView({ onBack, onOpenDeadDrop }: MessagesViewPro
     subject: '',
     body: '',
   });
-  const [contactRequestTarget, setContactRequestTarget] = useState('');
   const [inviteImportAlias, setInviteImportAlias] = useState('');
   const [inviteImportBlob, setInviteImportBlob] = useState('');
   const [inviteBusy, setInviteBusy] = useState(false);
   const [inviteScanOpen, setInviteScanOpen] = useState(false);
   const [inviteScanStatus, setInviteScanStatus] = useState('');
-  const [dmLaneWarmStatus, setDmLaneWarmStatus] = useState('');
+  const [dmAddressLabel, setDmAddressLabel] = useState('');
+  const [dmAddresses, setDmAddresses] = useState<LocalDmAddress[]>([]);
+  const [remoteDmHandles, setRemoteDmHandles] = useState<Record<string, WormholeDmAddressRecord>>({});
+  const [dmAddressEditLabels, setDmAddressEditLabels] = useState<Record<string, string>>({});
+  const [dmAddressBusy, setDmAddressBusy] = useState('');
+  const [dmAddressCopyStatus, setDmAddressCopyStatus] = useState('');
+  const [, setDmLaneWarmStatus] = useState('');
   const [privateDelivery, setPrivateDelivery] = useState<PrivateDeliverySummary | null>(null);
   const [privateDeliveryBusyId, setPrivateDeliveryBusyId] = useState('');
   const inviteVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -566,11 +656,16 @@ export default function MessagesView({ onBack, onOpenDeadDrop }: MessagesViewPro
 
   useEffect(() => {
     setMessages(loadMailbox(scopeId));
+    setDmAddresses(loadDmAddresses(scopeId));
   }, [scopeId]);
 
   useEffect(() => {
     saveMailbox(scopeId, sortMessages(messages));
   }, [messages, scopeId]);
+
+  useEffect(() => {
+    saveDmAddresses(scopeId, dmAddresses);
+  }, [dmAddresses, scopeId]);
 
   useEffect(() => {
     let alive = true;
@@ -651,6 +746,31 @@ export default function MessagesView({ onBack, onOpenDeadDrop }: MessagesViewPro
       ),
     [privateDelivery],
   );
+  const activeDmAddresses = useMemo(
+    () =>
+      dmAddresses.filter((address) => {
+        const server = remoteDmHandles[address.handle];
+        return !address.revokedAt && !server?.expired && !server?.exhausted && !server?.revoked;
+      }),
+    [dmAddresses, remoteDmHandles],
+  );
+  const managedDmAddresses = useMemo(() => {
+    const seen = new Set(dmAddresses.map((address) => address.handle));
+    const serverOnly = Object.values(remoteDmHandles)
+      .filter((address) => address.handle && !seen.has(address.handle))
+      .map<LocalDmAddress>((address) => ({
+        id: `remote-dm-address-${address.handle}`,
+        label: address.label || 'DM address',
+        handle: address.handle,
+        peerId: '',
+        trustFingerprint: '',
+        inviteBlob: '',
+        createdAt: address.issued_at || 0,
+        expiresAt: address.expires_at || undefined,
+      }));
+    return [...dmAddresses, ...serverOnly].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  }, [dmAddresses, remoteDmHandles]);
+  const primaryDmAddress = activeDmAddresses[0] || null;
 
   const resolveMessagingIdentity = useCallback(async () => {
     const localIdentity = getNodeIdentity();
@@ -1562,25 +1682,6 @@ export default function MessagesView({ onBack, onOpenDeadDrop }: MessagesViewPro
     }
   }, [contacts, dmLaneReady, draft, ensureSecureMailLane, identity, queueSentMail, secureRequired, syncSecureMailRuntime, wormholeReadyState]);
 
-  const handleSendContactRequest = useCallback(async () => {
-    const recipient = contactRequestTarget.trim();
-    if (!recipient) {
-      setComposeError('Enter an agent ID to send a contact request.');
-      return;
-    }
-    setDraft((prev) => ({
-      ...prev,
-      recipient,
-    }));
-    setActiveTab('compose');
-    setComposeError('');
-    setComposeStatus(
-      requiresVerifiedFirstContact(contacts[recipient])
-        ? 'Signed invite import is required before first contact. Unverified TOFU contact requests are disabled.'
-        : '',
-    );
-  }, [contactRequestTarget, contacts]);
-
   const handleImportInvite = useCallback(async () => {
     const raw = inviteImportBlob.trim();
     if (!raw) {
@@ -1642,6 +1743,174 @@ export default function MessagesView({ onBack, onOpenDeadDrop }: MessagesViewPro
       setInviteBusy(false);
     }
   }, [ensureSecureMailLane, inviteImportAlias, inviteImportBlob, wormholeReadyState]);
+
+  const refreshDmAddressHandles = useCallback(async () => {
+    try {
+      const result = await listWormholeDmInviteHandles();
+      const next: Record<string, WormholeDmAddressRecord> = {};
+      for (const address of result.addresses || []) {
+        if (address.handle) {
+          next[address.handle] = address;
+        }
+      }
+      setRemoteDmHandles(next);
+    } catch {
+      /* best effort only */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!identity) return;
+    void refreshDmAddressHandles();
+  }, [identity, refreshDmAddressHandles]);
+
+  const handleGenerateDmAddress = useCallback(async () => {
+    setDmAddressBusy('generate');
+    setDmAddressCopyStatus('');
+    setComposeError('');
+    setComposeStatus('');
+    try {
+      const label = dmAddressLabel.trim() || `DM address ${new Date().toLocaleString()}`;
+      const exported = await exportWormholeDmInvite({ label });
+      if (!exported.ok || !exported.invite) {
+        throw new Error(exported.detail || 'DM address generation failed');
+      }
+      const handle = inviteLookupHandle(exported.invite as unknown as Record<string, unknown>);
+      if (!handle) {
+        throw new Error('DM address did not include a lookup handle.');
+      }
+      const inviteBlob = JSON.stringify(
+        {
+          type: 'shadowbroker.infonet.dm.invite',
+          version: 1,
+          label,
+          created_at: Math.floor(Date.now() / 1000),
+          invite: exported.invite,
+        },
+        null,
+        2,
+      );
+      const record: LocalDmAddress = {
+        id: randomId('dm-address'),
+        label,
+        handle,
+        peerId: exported.peer_id,
+        trustFingerprint: exported.trust_fingerprint,
+        inviteBlob,
+        createdAt: Math.floor(Date.now() / 1000),
+        expiresAt: Number((exported.invite.payload as Record<string, unknown>)?.expires_at || 0) || undefined,
+      };
+      setDmAddresses((prev) => [record, ...prev.filter((item) => item.handle !== handle)].slice(0, 32));
+      setDmAddressLabel('');
+      await navigator.clipboard?.writeText(handle).catch(() => undefined);
+      setDmAddressCopyStatus(
+        exported.prekey_publish_pending
+          ? `Generated and copied ${label} address. Private delivery will activate as soon as the lane finishes connecting.`
+          : `Generated and copied ${label} address.`,
+      );
+      await refreshDmAddressHandles();
+    } catch (error) {
+      setComposeError(error instanceof Error ? error.message : 'DM address generation failed');
+    } finally {
+      setDmAddressBusy('');
+    }
+  }, [dmAddressLabel, refreshDmAddressHandles]);
+
+  const handleCopyDmAddress = useCallback(async (address: LocalDmAddress) => {
+    setDmAddressBusy(`copy:${address.handle}`);
+    setDmAddressCopyStatus('');
+    try {
+      const shareText = dmAddressShareText(address);
+      if (!shareText) {
+        throw new Error('This address has no local handle to copy.');
+      }
+      await navigator.clipboard?.writeText(shareText);
+      setDmAddressCopyStatus(`Copied ${address.label || shortHandle(address.handle)}.`);
+    } catch (error) {
+      setDmAddressCopyStatus(
+        error instanceof Error ? error.message : 'Copy failed. Select the address and copy it manually.',
+      );
+    } finally {
+      setDmAddressBusy('');
+    }
+  }, []);
+
+  const handleRevokeDmAddress = useCallback(
+    async (address: LocalDmAddress) => {
+      setDmAddressBusy(`revoke:${address.handle}`);
+      setDmAddressCopyStatus('');
+      try {
+        const result = await revokeWormholeDmInviteHandle(address.handle);
+        setDmAddresses((prev) =>
+          prev.map((item) =>
+            item.handle === address.handle
+              ? { ...item, inviteBlob: '', revokedAt: Math.floor(Date.now() / 1000) }
+              : item,
+          ),
+        );
+        setDmAddressCopyStatus(
+          result.revoked
+            ? `Revoked ${address.label || shortHandle(address.handle)} for new first-contact and removed the local share text.`
+            : `${address.label || shortHandle(address.handle)} was already inactive.`,
+        );
+        await refreshDmAddressHandles();
+      } catch (error) {
+        setComposeError(error instanceof Error ? error.message : 'DM address revoke failed');
+      } finally {
+        setDmAddressBusy('');
+      }
+    },
+    [refreshDmAddressHandles],
+  );
+
+  const handleRenameDmAddress = useCallback(
+    async (address: LocalDmAddress, nextLabel: string) => {
+      const label = nextLabel.trim() || 'DM address';
+      setDmAddressBusy(`rename:${address.handle}`);
+      setDmAddressCopyStatus('');
+      setComposeError('');
+      try {
+        const result = await renameWormholeDmInviteHandle(address.handle, label);
+        if (!result.ok) {
+          throw new Error(result.detail || 'DM address label update failed');
+        }
+        setDmAddresses((prev) => {
+          const found = prev.some((item) => item.handle === address.handle);
+          const updated = prev.map((item) =>
+            item.handle === address.handle ? { ...item, label } : item,
+          );
+          return found ? updated : [{ ...address, label }, ...prev].slice(0, 32);
+        });
+        setRemoteDmHandles((prev) =>
+          prev[address.handle]
+            ? { ...prev, [address.handle]: { ...prev[address.handle], label } }
+            : prev,
+        );
+        setDmAddressEditLabels((prev) => {
+          const next = { ...prev };
+          delete next[address.handle];
+          return next;
+        });
+        setDmAddressCopyStatus(`Renamed ${shortHandle(address.handle)} to ${label}.`);
+        await refreshDmAddressHandles();
+      } catch (error) {
+        setComposeError(error instanceof Error ? error.message : 'DM address label update failed');
+      } finally {
+        setDmAddressBusy('');
+      }
+    },
+    [refreshDmAddressHandles],
+  );
+
+  const handleForgetDmAddress = useCallback((address: LocalDmAddress) => {
+    setDmAddresses((prev) => prev.filter((item) => item.handle !== address.handle));
+    setDmAddressEditLabels((prev) => {
+      const next = { ...prev };
+      delete next[address.handle];
+      return next;
+    });
+    setDmAddressCopyStatus(`Forgot local record for ${address.label || shortHandle(address.handle)}.`);
+  }, []);
 
   const handleStartInviteScan = useCallback(() => {
     setComposeError('');
@@ -1850,23 +2119,20 @@ export default function MessagesView({ onBack, onOpenDeadDrop }: MessagesViewPro
   }, []);
 
   const statusLine = useMemo(() => {
-    if (dmLaneWarmStatus) {
-      return dmLaneWarmStatus;
-    }
-    if (!wormholeReadyState) {
-      return 'Secure mail is preparing the local obfuscated identity in the background.';
-    }
-    if (!dmLaneReady) {
-      return 'Secure mail is starting the direct obfuscated DM transport in the background.';
-    }
     if (!identity) {
-      return 'Secure mail is preparing the local private identity in the background.';
+      return 'Secure identity is loading.';
+    }
+    if (!wormholeReadyState || !dmLaneReady) {
+      return 'Private message delivery is connecting. You can generate and copy your public address now.';
     }
     if (syncing) {
       return 'SYNCING SECURE MAILBOX...';
     }
-    return `SECURE MAIL READY - ${serverPendingCount} remote items still pending on the server.`;
-  }, [dmLaneReady, dmLaneWarmStatus, identity, serverPendingCount, syncing, wormholeReadyState]);
+    if (serverPendingCount > 0) {
+      return `SECURE MAIL READY - ${serverPendingCount} queued server item${serverPendingCount === 1 ? '' : 's'} still syncing.`;
+    }
+    return 'SECURE MAIL READY';
+  }, [dmLaneReady, identity, serverPendingCount, syncing, wormholeReadyState]);
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden">
@@ -1897,6 +2163,62 @@ export default function MessagesView({ onBack, onOpenDeadDrop }: MessagesViewPro
 
       <div className="border border-cyan-900/30 bg-cyan-950/10 px-4 py-3 text-[11px] tracking-[0.16em] uppercase text-cyan-300 mb-4 shrink-0">
         {statusLine}
+      </div>
+
+      <div className="border border-emerald-500/25 bg-emerald-950/5 px-4 py-4 mb-4 shrink-0">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="min-w-0 flex-1">
+            <div className="text-[11px] tracking-[0.2em] uppercase text-emerald-300 flex items-center">
+              <KeyRound size={14} className="mr-2" />
+              My Public Address
+            </div>
+            <div className="mt-2 text-sm text-gray-300">
+              {primaryDmAddress ? (
+                <>
+                  <div className="text-white">{primaryDmAddress.label || 'Default address'}</div>
+                  <div className="mt-2 overflow-auto break-all border border-emerald-500/20 bg-black/40 p-3 font-mono text-[12px] leading-relaxed text-emerald-200">
+                    {dmAddressShareText(primaryDmAddress)}
+                  </div>
+                </>
+              ) : (
+                'Generate an address, then send it to someone so they can contact you.'
+              )}
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {primaryDmAddress && (
+              <button
+                type="button"
+                onClick={() => void handleCopyDmAddress(primaryDmAddress)}
+                className="px-4 py-2 border border-cyan-500/30 text-cyan-300 text-xs tracking-[0.18em] uppercase"
+              >
+                <Copy size={13} className="inline mr-1" />
+                Copy Address
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => void handleGenerateDmAddress()}
+              disabled={dmAddressBusy === 'generate'}
+              className="px-4 py-2 border border-emerald-500/40 bg-emerald-950/20 text-emerald-300 text-xs tracking-[0.18em] uppercase disabled:opacity-50"
+            >
+              {dmAddressBusy === 'generate' ? 'Generating...' : primaryDmAddress ? 'New Address' : 'Generate Address'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('contacts');
+                setDmAddressCopyStatus('Manage addresses below. Revoke an address to stop new first-contact through it.');
+              }}
+              className="px-4 py-2 border border-gray-700 bg-gray-950/20 text-gray-300 text-xs tracking-[0.18em] uppercase"
+            >
+              Manage
+            </button>
+          </div>
+        </div>
+        {dmAddressCopyStatus && (
+          <div className="mt-3 text-sm text-emerald-300">{dmAddressCopyStatus}</div>
+        )}
       </div>
 
       {(pollError || composeError || composeStatus) && (
@@ -2135,13 +2457,9 @@ export default function MessagesView({ onBack, onOpenDeadDrop }: MessagesViewPro
               </div>
 
               <div className="mt-4 border border-amber-500/20 bg-amber-950/10 px-4 py-3 text-xs text-amber-300">
-                {dmLaneWarmStatus
-                  ? dmLaneWarmStatus
-                  : !wormholeReadyState
-                    ? 'Secure mail is waking up in the background. You can finish the draft now and send when the lane is ready.'
-                    : !dmLaneReady
-                      ? 'Secure mail is bringing the private lane online in the background.'
-                      : 'If the recipient is not already in your contacts, sending from here opens with a secure contact request first. Full mail begins after they accept.'}
+                {!wormholeReadyState || !dmLaneReady
+                  ? 'Private message lane is still connecting. You can write now and send when it is ready.'
+                  : 'To message someone new, paste their public address in Contacts first. Existing contacts can be messaged from here.'}
               </div>
 
               {privateDeliveryRows.length > 0 && (
@@ -2209,7 +2527,6 @@ export default function MessagesView({ onBack, onOpenDeadDrop }: MessagesViewPro
                     <button
                       onClick={() => {
                         setInviteImportAlias((prev) => prev || composeRecipient);
-                        setContactRequestTarget(composeRecipient);
                         setActiveTab('contacts');
                         setComposeStatus(
                           `Import a signed invite for ${composeRecipient} before returning to Compose.`,
@@ -2352,7 +2669,6 @@ export default function MessagesView({ onBack, onOpenDeadDrop }: MessagesViewPro
                               <button
                                 onClick={() => {
                                   setInviteImportAlias((prev) => prev || peerId);
-                                  setContactRequestTarget(peerId);
                                   setComposeStatus(
                                     `Import a signed invite for ${displayNameForPeer(peerId, contacts)} in the panel below.`,
                                   );
@@ -2400,70 +2716,163 @@ export default function MessagesView({ onBack, onOpenDeadDrop }: MessagesViewPro
               </div>
             </div>
 
-            <div className="border border-gray-800/80 p-6">
-              <div className="text-xs tracking-[0.2em] uppercase text-cyan-300 mb-4 flex items-center">
-                <UserPlus size={14} className="mr-2" />
-                Add Contact
-              </div>
-              <label className="text-xs tracking-[0.18em] uppercase text-gray-500">
-                Agent ID
-                <input
-                  value={contactRequestTarget}
-                  onChange={(event) => setContactRequestTarget(event.target.value)}
-                  className="mt-2 w-full bg-transparent border border-gray-800 px-4 py-3 text-sm text-white outline-none focus:border-cyan-500/40"
-                  placeholder="!sb_..."
-                  spellCheck={false}
-                />
-              </label>
-              <div className="mt-4 text-sm text-gray-500">
-                Signed invite import is now the required first-contact path for new secure contact
-                requests. Verify the invite over QR or another trusted side channel first.
-              </div>
-              <div className="mt-6">
-                <div className="flex flex-wrap gap-3">
+            <div className="space-y-6">
+              <div className="border border-emerald-500/25 p-6 bg-emerald-950/5">
+                <div className="text-xs tracking-[0.2em] uppercase text-emerald-300 mb-4 flex items-center">
+                  <KeyRound size={14} className="mr-2" />
+                  Your Share Addresses
+                </div>
+                <div className="text-sm text-gray-400 leading-[1.65] mb-4">
+                  This is what you give someone so they can message you. Generate more than one
+                  if you want separate labels, then revoke any address you no longer want to accept
+                  new first-contact requests through.
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    value={dmAddressLabel}
+                    onChange={(event) => setDmAddressLabel(event.target.value)}
+                    className="flex-1 bg-transparent border border-gray-800 px-4 py-3 text-sm text-white outline-none focus:border-emerald-500/40"
+                    placeholder="Label, e.g. Signal test, conference, one-off"
+                    spellCheck={false}
+                  />
                   <button
-                    onClick={() => void handleSendContactRequest()}
-                    className="px-4 py-3 border border-cyan-500/40 bg-cyan-950/20 text-cyan-300 text-xs tracking-[0.18em] uppercase disabled:opacity-50"
-                  >
-                    Prepare First Contact
-                  </button>
-                  <button
-                    onClick={() => handleStartInviteScan()}
+                    onClick={() => void handleGenerateDmAddress()}
+                    disabled={dmAddressBusy === 'generate'}
                     className="px-4 py-3 border border-emerald-500/40 bg-emerald-950/20 text-emerald-300 text-xs tracking-[0.18em] uppercase disabled:opacity-50"
                   >
-                    Scan Invite QR
+                    {dmAddressBusy === 'generate' ? 'Generating...' : 'Generate'}
                   </button>
+                </div>
+                {dmAddressCopyStatus && (
+                  <div className="mt-3 text-sm text-emerald-300">{dmAddressCopyStatus}</div>
+                )}
+                <div className="mt-4 space-y-3">
+                  {managedDmAddresses.length === 0 ? (
+                    <div className="text-sm text-gray-500">No public address yet. Generate one above.</div>
+                  ) : (
+                    managedDmAddresses.map((address) => {
+                      const server = remoteDmHandles[address.handle];
+                      const inactive = Boolean(address.revokedAt || server?.expired || server?.exhausted || server?.revoked);
+                      const shareText = dmAddressShareText(address);
+                      const editLabel = dmAddressEditLabels[address.handle] ?? address.label ?? '';
+                      return (
+                        <div key={address.id} className="border border-gray-800/70 p-3">
+                          <div className="space-y-3">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="text-sm text-white break-words">
+                                  {address.label || 'DM address'}
+                                </div>
+                                <div className="mt-1 text-[11px] text-gray-500">
+                                  Created: {formatDmAddressDate(address.createdAt)}
+                                  {address.expiresAt ? ` / Expires: ${formatDmAddressDate(address.expiresAt)}` : ''}
+                                </div>
+                                <div className={`mt-2 text-[11px] tracking-[0.16em] uppercase ${inactive ? 'text-red-300' : 'text-emerald-300'}`}>
+                                  {inactive
+                                    ? 'Inactive'
+                                    : `${server?.remaining_uses ?? 'active'} first-contact uses left`}
+                                </div>
+                              </div>
+                              <div className="flex flex-wrap justify-end gap-2">
+                                <button
+                                  onClick={() => void handleCopyDmAddress(address)}
+                                  disabled={!shareText}
+                                  className="px-3 py-2 border border-cyan-500/30 text-cyan-300 text-xs tracking-[0.18em] uppercase disabled:opacity-40"
+                                  title="Copy public address"
+                                >
+                                  <Copy size={13} className="inline mr-1" />
+                                  Copy
+                                </button>
+                                <button
+                                  onClick={() => void handleRevokeDmAddress(address)}
+                                  disabled={inactive || dmAddressBusy === `revoke:${address.handle}`}
+                                  className="px-3 py-2 border border-red-500/30 text-red-300 text-xs tracking-[0.18em] uppercase disabled:opacity-40"
+                                >
+                                  {dmAddressBusy === `revoke:${address.handle}` ? 'Revoking...' : 'Revoke'}
+                                </button>
+                                {inactive && (
+                                  <button
+                                    onClick={() => handleForgetDmAddress(address)}
+                                    className="px-3 py-2 border border-gray-700 text-gray-300 text-xs tracking-[0.18em] uppercase"
+                                  >
+                                    Forget
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                            <div className="grid grid-cols-[1fr_auto] gap-2">
+                              <input
+                                value={editLabel}
+                                onChange={(event) =>
+                                  setDmAddressEditLabels((prev) => ({
+                                    ...prev,
+                                    [address.handle]: event.target.value,
+                                  }))
+                                }
+                                className="bg-transparent border border-gray-800 px-3 py-2 text-xs text-white outline-none focus:border-emerald-500/40"
+                                placeholder="Address label"
+                                spellCheck={false}
+                              />
+                              <button
+                                onClick={() => void handleRenameDmAddress(address, editLabel)}
+                                disabled={
+                                  dmAddressBusy === `rename:${address.handle}` ||
+                                  editLabel.trim() === (address.label || 'DM address')
+                                }
+                                className="px-3 py-2 border border-emerald-500/30 text-emerald-300 text-xs tracking-[0.18em] uppercase disabled:opacity-40"
+                              >
+                                {dmAddressBusy === `rename:${address.handle}` ? 'Saving...' : 'Save Label'}
+                              </button>
+                            </div>
+                            <div className="border border-gray-800 bg-black/40 p-3 text-[11px] text-emerald-200 font-mono break-all">
+                              {shareText || 'Address unavailable locally.'}
+                            </div>
+                            <div className="text-[11px] text-gray-500 leading-relaxed">
+                              Revoking disables this public address for new first-contact requests. Existing approved
+                              contacts remain contacts.
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
                 </div>
               </div>
 
-              <div className="mt-8 pt-6 border-t border-gray-800/80">
-                <div className="text-xs tracking-[0.2em] uppercase text-emerald-300 mb-4">
-                  Import Verified Invite
+              <div className="border border-gray-800/80 p-6">
+                <div className="text-xs tracking-[0.2em] uppercase text-cyan-300 mb-4 flex items-center">
+                  <UserPlus size={14} className="mr-2" />
+                  Paste Someone&apos;s Address
                 </div>
+                <div className="text-sm text-gray-400 leading-[1.65]">
+                  Paste the public address someone gave you. Once imported, they show up as a contact
+                  and you can send secure mail from Compose.
+                </div>
+
+              <div className="mt-6">
                 <label className="text-xs tracking-[0.18em] uppercase text-gray-500">
                   Local Alias
                   <input
                     value={inviteImportAlias}
                     onChange={(event) => setInviteImportAlias(event.target.value)}
                     className="mt-2 w-full bg-transparent border border-gray-800 px-4 py-3 text-sm text-white outline-none focus:border-emerald-500/40"
-                    placeholder="Optional display label"
+                    placeholder="Optional label, e.g. Jordan, field laptop"
                     spellCheck={false}
                   />
                 </label>
                 <label className="text-xs tracking-[0.18em] uppercase text-gray-500 block mt-4">
-                  Signed Invite JSON
+                  Public Address
                   <textarea
                     value={inviteImportBlob}
                     onChange={(event) => setInviteImportBlob(event.target.value)}
                     className="mt-2 w-full min-h-[200px] bg-transparent border border-gray-800 px-4 py-3 text-sm text-white outline-none focus:border-emerald-500/40 font-mono"
-                    placeholder='Paste the full export blob or the nested "invite" object here...'
+                    placeholder="Paste the address blob someone copied from their Secure Messages screen..."
                     spellCheck={false}
                   />
                 </label>
                 <div className="mt-4 text-sm text-gray-500 leading-[1.65]">
-                  Importing a signed invite pins first contact to a trusted out-of-band identity
-                  instead of plain first-sight TOFU. Use this when the invite came from QR,
-                  in-person exchange, or another authenticated side channel.
+                  The pasted address is signed. Importing it creates the first-contact anchor for
+                  that person without exposing your private keys.
                 </div>
                 {(inviteScanOpen || inviteScanStatus) && (
                   <div className="mt-4 border border-emerald-500/20 bg-black/30 p-4">
@@ -2490,16 +2899,23 @@ export default function MessagesView({ onBack, onOpenDeadDrop }: MessagesViewPro
                     )}
                   </div>
                 )}
-                <div className="mt-6">
+                <div className="mt-6 flex flex-wrap gap-3">
                   <button
                     onClick={() => void handleImportInvite()}
                     disabled={inviteBusy || !inviteImportBlob.trim()}
                     className="px-4 py-3 border border-emerald-500/40 bg-emerald-950/20 text-emerald-300 text-xs tracking-[0.18em] uppercase disabled:opacity-50"
                   >
-                    {inviteBusy ? 'Importing...' : 'Import Signed Invite'}
+                    {inviteBusy ? 'Importing...' : 'Import Address'}
+                  </button>
+                  <button
+                    onClick={() => handleStartInviteScan()}
+                    className="px-4 py-3 border border-gray-700 bg-gray-950/20 text-gray-400 text-xs tracking-[0.18em] uppercase disabled:opacity-50"
+                  >
+                    Camera Scan
                   </button>
                 </div>
               </div>
+            </div>
             </div>
           </div>
         )}

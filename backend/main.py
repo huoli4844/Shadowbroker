@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from json import JSONDecodeError
 
-APP_VERSION = "0.9.75"
+APP_VERSION = "0.9.79"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -3061,6 +3061,24 @@ def _resume_private_delivery_background_work(*, current_tier: str, reason: str) 
     )
 
 
+def _is_public_meshtastic_lane_path(path: str, method: str) -> bool:
+    """Routes for the public Meshtastic MQTT lane.
+
+    These are intentionally outside the Wormhole/Infonet private transport
+    lifecycle. Polling public MeshChat must not wake or re-enable Wormhole.
+    """
+    normalized_path = str(path or "").strip()
+    method_name = str(method or "").upper()
+    if method_name == "POST" and normalized_path == "/api/mesh/meshtastic/send":
+        return True
+    if method_name == "GET" and normalized_path in {
+        "/api/mesh/messages",
+        "/api/mesh/channels",
+    }:
+        return True
+    return False
+
+
 def _upgrade_invite_scoped_contact_preferences_background() -> dict[str, Any]:
     try:
         from services.mesh.mesh_wormhole_contacts import upgrade_invite_scoped_contact_preferences
@@ -3092,7 +3110,11 @@ def _refresh_lookup_handle_rotation_background(*, reason: str) -> dict[str, Any]
 @app.middleware("http")
 async def enforce_high_privacy_mesh(request: Request, call_next):
     path = request.url.path
-    if path.startswith("/api/mesh") or path.startswith("/api/wormhole/gate/") or path.startswith("/api/wormhole/dm/"):
+    private_mesh_path = path.startswith("/api/mesh") and not _is_public_meshtastic_lane_path(
+        path,
+        request.method,
+    )
+    if private_mesh_path or path.startswith("/api/wormhole/gate/") or path.startswith("/api/wormhole/dm/"):
         request.state._private_lane_started_at = time.perf_counter()
         current_tier = "public_degraded"
         try:
@@ -3193,7 +3215,7 @@ async def enforce_high_privacy_mesh(request: Request, call_next):
             # Don't block the request on the upgrade — the transport
             # manager will converge in the background.
             if (
-                path.startswith("/api/mesh")
+                private_mesh_path
                 and str(data.get("privacy_profile", "default")).lower() == "high"
                 and not bool(data.get("enabled"))
             ):
@@ -3426,8 +3448,16 @@ async def update_layers(update: LayerUpdate, request: Request):
     from services.sigint_bridge import sigint_grid
 
     if old_mesh and not new_mesh:
-        sigint_grid.mesh.stop()
-        logger.info("Meshtastic MQTT bridge stopped (layer disabled)")
+        try:
+            from services.meshtastic_mqtt_settings import mqtt_bridge_enabled
+            keep_chat_running = mqtt_bridge_enabled()
+        except Exception:
+            keep_chat_running = False
+        if keep_chat_running:
+            logger.info("Meshtastic map layer disabled; MQTT bridge kept running for MeshChat")
+        else:
+            sigint_grid.mesh.stop()
+            logger.info("Meshtastic MQTT bridge stopped (layer disabled)")
     elif not old_mesh and new_mesh:
         # Respect the global MESH_MQTT_ENABLED gate even when the UI layer is
         # toggled on. The layer toggle should not bypass the opt-in flag that
@@ -4361,9 +4391,11 @@ async def mesh_send(request: Request):
     any_ok = any(r.ok for r in results)
 
     # â”€â”€â”€ Mirror to Meshtastic bridge feed â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    # The MQTT broker won't echo our own publishes back to our subscriber,
-    # so inject successfully-sent messages into the bridge's deque directly.
-    if any_ok and envelope.routed_via == "meshtastic":
+    # The MQTT broker won't echo our own publishes back to our subscriber, so
+    # inject successfully-sent channel broadcasts into the bridge directly.
+    # Node-targeted packets must not appear in the public channel feed.
+    is_direct_destination = MeshtasticTransport._parse_node_id(destination) is not None
+    if any_ok and envelope.routed_via == "meshtastic" and not is_direct_destination:
         try:
             from services.sigint_bridge import sigint_grid
 
@@ -4371,16 +4403,22 @@ async def mesh_send(request: Request):
             if bridge:
                 from datetime import datetime
 
-                bridge.messages.appendleft(
+                append_text = getattr(bridge, "append_text_message", None)
+                message_record = (
                     {
                         "from": MeshtasticTransport.mesh_address_for_sender(node_id),
-                        "to": destination if MeshtasticTransport._parse_node_id(destination) is not None else "broadcast",
+                        "to": "broadcast",
                         "text": message,
                         "region": credentials.get("mesh_region", "US"),
+                        "root": credentials.get("mesh_region", "US"),
                         "channel": body.get("channel", "LongFast"),
                         "timestamp": datetime.utcnow().isoformat() + "Z",
                     }
                 )
+                if callable(append_text):
+                    append_text(message_record)
+                else:
+                    bridge.messages.appendleft(message_record)
         except Exception:
             pass  # Non-critical
 
@@ -4390,6 +4428,8 @@ async def mesh_send(request: Request):
         "event_id": "",
         "routed_via": envelope.routed_via,
         "route_reason": envelope.route_reason,
+        "direct": is_direct_destination,
+        "channel_echo": not is_direct_destination,
         "results": [r.to_dict() for r in results],
     }
 
@@ -4488,6 +4528,7 @@ async def mesh_messages(
     root: str = "",
     channel: str = "",
     limit: int = 30,
+    include_direct: bool = False,
 ):
     """Get recent Meshtastic text messages from the MQTT bridge."""
     from services.sigint_bridge import sigint_grid
@@ -4509,6 +4550,12 @@ async def mesh_messages(
         msgs = [m for m in msgs if m.get("root", "").upper() == root_filter]
     if channel:
         msgs = [m for m in msgs if m.get("channel", "").lower() == channel.lower()]
+    if not include_direct:
+        msgs = [
+            m
+            for m in msgs
+            if str(m.get("to") or "broadcast").strip().lower() in {"", "broadcast", "^all"}
+        ]
     return msgs[: min(limit, 100)]
 
 
@@ -8789,6 +8836,16 @@ export_wormhole_dm_invite = getattr(
     "export_wormhole_dm_invite",
     _wormhole_identity_unavailable,
 )
+list_prekey_lookup_handle_records_for_ui = getattr(
+    _mesh_wormhole_identity,
+    "list_prekey_lookup_handle_records_for_ui",
+    _wormhole_identity_unavailable,
+)
+revoke_prekey_lookup_handle = getattr(
+    _mesh_wormhole_identity,
+    "revoke_prekey_lookup_handle",
+    _wormhole_identity_unavailable,
+)
 import_wormhole_dm_invite = getattr(
     _mesh_wormhole_identity,
     "import_wormhole_dm_invite",
@@ -8935,6 +8992,13 @@ async def api_get_node_settings(request: Request):
 @limiter.limit("10/minute")
 async def api_set_node_settings(request: Request, body: NodeSettingsUpdate):
     _refresh_node_peer_store()
+    if bool(body.enabled):
+        try:
+            from services.transport_lane_isolation import disable_public_mesh_lane
+
+            disable_public_mesh_lane(reason="private_node_enabled")
+        except Exception as exc:
+            logger.warning("Failed to disable public Mesh while enabling private node: %s", exc)
     result = _set_participant_node_enabled(bool(body.enabled))
     if bool(body.enabled):
         _kick_public_sync_background("operator_enable")
@@ -9659,7 +9723,7 @@ async def api_get_wormhole_status(request: Request):
     )
 
 
-@app.post("/api/wormhole/join", dependencies=[Depends(require_local_operator)])
+@app.post("/api/wormhole/join")
 @limiter.limit("10/minute")
 async def api_wormhole_join(request: Request):
     existing = read_wormhole_settings()
@@ -9713,7 +9777,7 @@ async def api_wormhole_join(request: Request):
     }
 
 
-@app.post("/api/wormhole/leave", dependencies=[Depends(require_local_operator)])
+@app.post("/api/wormhole/leave")
 @limiter.limit("10/minute")
 async def api_wormhole_leave(request: Request):
     updated = write_wormhole_settings(enabled=False)
@@ -9730,7 +9794,7 @@ async def api_wormhole_leave(request: Request):
     }
 
 
-@app.get("/api/wormhole/identity", dependencies=[Depends(require_local_operator)])
+@app.get("/api/wormhole/identity")
 @limiter.limit("30/minute")
 async def api_wormhole_identity(request: Request):
     try:
@@ -9743,7 +9807,7 @@ async def api_wormhole_identity(request: Request):
         raise HTTPException(status_code=500, detail="wormhole_identity_failed") from exc
 
 
-@app.post("/api/wormhole/identity/bootstrap", dependencies=[Depends(require_local_operator)])
+@app.post("/api/wormhole/identity/bootstrap")
 @limiter.limit("10/minute")
 async def api_wormhole_identity_bootstrap(request: Request):
     bootstrap_wormhole_identity()
@@ -9776,8 +9840,24 @@ async def api_wormhole_dm_identity(request: Request):
 
 @app.get("/api/wormhole/dm/invite", dependencies=[Depends(require_local_operator)])
 @limiter.limit("30/minute")
-async def api_wormhole_dm_invite(request: Request):
-    return export_wormhole_dm_invite()
+async def api_wormhole_dm_invite(
+    request: Request,
+    label: str = Query("", max_length=96),
+    expires_in_s: int = Query(0, ge=0, le=2_592_000),
+):
+    return export_wormhole_dm_invite(label=label, expires_in_s=expires_in_s)
+
+
+@app.get("/api/wormhole/dm/invite/handles", dependencies=[Depends(require_local_operator)])
+@limiter.limit("30/minute")
+async def api_wormhole_dm_invite_handles(request: Request):
+    return list_prekey_lookup_handle_records_for_ui()
+
+
+@app.delete("/api/wormhole/dm/invite/handles/{handle}", dependencies=[Depends(require_local_operator)])
+@limiter.limit("30/minute")
+async def api_wormhole_dm_invite_handle_revoke(request: Request, handle: str):
+    return revoke_prekey_lookup_handle(handle)
 
 
 @app.post("/api/wormhole/dm/invite/import", dependencies=[Depends(require_admin)])
@@ -10507,7 +10587,7 @@ async def api_wormhole_sign(request: Request, body: WormholeSignRequest):
     )
 
 
-@app.post("/api/wormhole/gate/enter", dependencies=[Depends(require_local_operator)])
+@app.post("/api/wormhole/gate/enter")
 @limiter.limit("20/minute")
 async def api_wormhole_gate_enter(request: Request, body: WormholeGateRequest):
     gate_id = str(body.gate_id or "")
@@ -10521,25 +10601,25 @@ async def api_wormhole_gate_enter(request: Request, body: WormholeGateRequest):
     return result
 
 
-@app.post("/api/wormhole/gate/leave", dependencies=[Depends(require_local_operator)])
+@app.post("/api/wormhole/gate/leave")
 @limiter.limit("20/minute")
 async def api_wormhole_gate_leave(request: Request, body: WormholeGateRequest):
     return leave_gate(str(body.gate_id or ""))
 
 
-@app.get("/api/wormhole/gate/{gate_id}/identity", dependencies=[Depends(require_local_operator)])
+@app.get("/api/wormhole/gate/{gate_id}/identity")
 @limiter.limit("30/minute")
 async def api_wormhole_gate_identity(request: Request, gate_id: str):
     return get_active_gate_identity(gate_id)
 
 
-@app.get("/api/wormhole/gate/{gate_id}/personas", dependencies=[Depends(require_local_operator)])
+@app.get("/api/wormhole/gate/{gate_id}/personas")
 @limiter.limit("30/minute")
 async def api_wormhole_gate_personas(request: Request, gate_id: str):
     return list_gate_personas(gate_id)
 
 
-@app.get("/api/wormhole/gate/{gate_id}/key", dependencies=[Depends(require_local_operator)])
+@app.get("/api/wormhole/gate/{gate_id}/key")
 @limiter.limit("30/minute")
 async def api_wormhole_gate_key_status(request: Request, gate_id: str):
     exposure = metadata_exposure_for_request(request, authenticated=True)
@@ -10563,7 +10643,7 @@ async def api_wormhole_gate_key_rotate(request: Request, body: WormholeGateRotat
     return result
 
 
-@app.post("/api/wormhole/gate/persona/create", dependencies=[Depends(require_local_operator)])
+@app.post("/api/wormhole/gate/persona/create")
 @limiter.limit("20/minute")
 async def api_wormhole_gate_persona_create(
     request: Request, body: WormholeGatePersonaCreateRequest
@@ -10579,7 +10659,7 @@ async def api_wormhole_gate_persona_create(
     return result
 
 
-@app.post("/api/wormhole/gate/persona/activate", dependencies=[Depends(require_local_operator)])
+@app.post("/api/wormhole/gate/persona/activate")
 @limiter.limit("20/minute")
 async def api_wormhole_gate_persona_activate(
     request: Request, body: WormholeGatePersonaActivateRequest
@@ -10595,7 +10675,7 @@ async def api_wormhole_gate_persona_activate(
     return result
 
 
-@app.post("/api/wormhole/gate/persona/clear", dependencies=[Depends(require_local_operator)])
+@app.post("/api/wormhole/gate/persona/clear")
 @limiter.limit("20/minute")
 async def api_wormhole_gate_persona_clear(request: Request, body: WormholeGateRequest):
     gate_id = str(body.gate_id or "")
@@ -10609,7 +10689,7 @@ async def api_wormhole_gate_persona_clear(request: Request, body: WormholeGateRe
     return result
 
 
-@app.post("/api/wormhole/gate/persona/retire", dependencies=[Depends(require_local_operator)])
+@app.post("/api/wormhole/gate/persona/retire")
 @limiter.limit("20/minute")
 async def api_wormhole_gate_persona_retire(
     request: Request, body: WormholeGatePersonaActivateRequest
@@ -10690,7 +10770,7 @@ async def api_wormhole_gate_message_compose(request: Request, body: WormholeGate
     return composed
 
 
-@app.post("/api/wormhole/gate/message/sign-encrypted", dependencies=[Depends(require_local_operator)])
+@app.post("/api/wormhole/gate/message/sign-encrypted")
 @limiter.limit("30/minute")
 async def api_wormhole_gate_message_sign_encrypted(
     request: Request,
@@ -10722,7 +10802,7 @@ async def api_wormhole_gate_message_sign_encrypted(
     return signed
 
 
-@app.post("/api/wormhole/gate/message/post-encrypted", dependencies=[Depends(require_local_operator)])
+@app.post("/api/wormhole/gate/message/post-encrypted")
 @limiter.limit("30/minute")
 async def api_wormhole_gate_message_post_encrypted(
     request: Request,
@@ -10902,13 +10982,13 @@ async def api_wormhole_gate_messages_decrypt(request: Request, body: WormholeGat
     return {"ok": True, "results": results}
 
 
-@app.post("/api/wormhole/gate/state/export", dependencies=[Depends(require_local_operator)])
+@app.post("/api/wormhole/gate/state/export")
 @limiter.limit("30/minute")
 async def api_wormhole_gate_state_export(request: Request, body: WormholeGateRequest):
     return export_gate_state_snapshot_with_repair(str(body.gate_id or ""))
 
 
-@app.post("/api/wormhole/gate/proof", dependencies=[Depends(require_local_operator)])
+@app.post("/api/wormhole/gate/proof")
 @limiter.limit("30/minute")
 async def api_wormhole_gate_proof(request: Request, body: WormholeGateRequest):
     proof = _sign_gate_access_proof(str(body.gate_id or ""))
@@ -11455,7 +11535,7 @@ async def api_wormhole_health(request: Request):
     return _redact_wormhole_status(full_state, authenticated=ok)
 
 
-@app.post("/api/wormhole/connect", dependencies=[Depends(require_admin)])
+@app.post("/api/wormhole/connect")
 @limiter.limit("10/minute")
 async def api_wormhole_connect(request: Request):
     settings = read_wormhole_settings()
