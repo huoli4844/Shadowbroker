@@ -1595,6 +1595,23 @@ class DMRelay:
             )
             self._stats["messages_in_memory"] = sum(len(v) for v in self._mailboxes.values())
             self._save()
+            # Cross-node mailbox replication: push the freshly-stored
+            # envelope to every authenticated relay peer so the recipient
+            # can log into ANY node and find their messages. The push is
+            # async (fire-and-forget thread) so deposit() returns
+            # immediately — slow Tor peers can't block the sender's UX.
+            # Each receiving peer re-enforces the per-sender cap on
+            # acceptance, so hostile relays can't widen the cap.
+            try:
+                envelope_for_push = self.envelope_for_replication(
+                    mailbox_key=mailbox_key, msg_id=msg_id,
+                )
+                if envelope_for_push:
+                    self._replicate_envelope_to_peers_async(
+                        envelope=envelope_for_push,
+                    )
+            except Exception:
+                metrics_inc("dm_replication_push_error")
             return {"ok": True, "msg_id": msg_id}
 
     def accept_replica(
@@ -1694,6 +1711,95 @@ class DMRelay:
             self._save()
             metrics_inc("dm_replica_accepted")
             return {"ok": True, "msg_id": msg_id}
+
+    def _replicate_envelope_to_peers_async(
+        self,
+        *,
+        envelope: dict[str, Any],
+    ) -> None:
+        """Push an outbound DM envelope to every authenticated relay peer.
+
+        Fire-and-forget: spawned in a background thread so ``deposit``
+        returns to the caller immediately. Per-peer errors are logged
+        and swallowed — the sender's UX must not block on slow Tor
+        peers, and a peer that's down today gets the next message
+        whenever it comes back. Inbound recipient polling from a healthy
+        peer keeps the system functional during peer failures.
+
+        Each peer is authed with the existing per-peer HMAC pattern
+        (#256) — same headers and key resolver gate-message replication
+        uses, so a hostile node that doesn't know any peer's HMAC key
+        can't impersonate a legitimate relay.
+        """
+        import threading
+
+        def _do_push():
+            try:
+                import hashlib
+                import hmac
+                import requests as _requests
+
+                from services.mesh.mesh_crypto import (
+                    normalize_peer_url,
+                    resolve_peer_key_for_url,
+                )
+                from services.mesh.mesh_router import (
+                    authenticated_push_peer_urls,
+                )
+
+                peers = authenticated_push_peer_urls()
+                if not peers:
+                    return
+
+                payload = json.dumps(
+                    {"envelope": envelope},
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+
+                timeout = max(
+                    1,
+                    int(getattr(self._settings(), "MESH_RELAY_PUSH_TIMEOUT_S", 10) or 10),
+                )
+
+                for peer_url in peers:
+                    try:
+                        normalized = normalize_peer_url(peer_url)
+                        headers = {"Content-Type": "application/json"}
+                        peer_key = resolve_peer_key_for_url(normalized)
+                        if peer_key:
+                            headers["X-Peer-Url"] = normalized
+                            headers["X-Peer-HMAC"] = hmac.new(
+                                peer_key, payload, hashlib.sha256
+                            ).hexdigest()
+                        url = f"{peer_url}/api/mesh/dm/replicate-envelope"
+                        resp = _requests.post(
+                            url, data=payload, timeout=timeout, headers=headers,
+                        )
+                        if resp.status_code == 200:
+                            metrics_inc("dm_replication_push_ok")
+                        else:
+                            # 4xx including the structured cap_violation
+                            # rejection from accept_replica — sender's
+                            # relay learns and stops retrying this msg_id.
+                            metrics_inc("dm_replication_push_rejected")
+                    except Exception:
+                        # Per-peer failure is non-fatal — log to metrics
+                        # but don't break the loop. Other peers and a
+                        # future retry can still propagate the envelope.
+                        metrics_inc("dm_replication_push_error")
+                        continue
+            except Exception:
+                # Outer guard — never let replication errors propagate
+                # back to the sender's deposit() caller.
+                metrics_inc("dm_replication_push_error")
+
+        thread = threading.Thread(
+            target=_do_push,
+            name="dm-replicate-push",
+            daemon=True,
+        )
+        thread.start()
 
     def envelope_for_replication(
         self,
