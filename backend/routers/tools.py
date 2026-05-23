@@ -120,18 +120,60 @@ def api_sentinel2_search(
     return search_sentinel2_scene(lat, lng)
 
 
+# Issue #298 (tg12): Sentinel credentials moved server-side
+# ---------------------------------------------------------------------------
+# Previously the frontend kept Copernicus CDSE client_id + client_secret in
+# browser localStorage / sessionStorage and forwarded them on every tile
+# request through this proxy. That exposed real third-party credentials to
+# any same-origin script (XSS, malicious browser extension, dev-tools HAR
+# export).
+#
+# Resolution order (first match wins):
+#   1. Request body — kept for back-compat. A small number of legacy
+#      operator setups may still post credentials; we don't break them.
+#   2. Backend .env — SENTINEL_CLIENT_ID / SENTINEL_CLIENT_SECRET, managed
+#      through the existing /api/settings/api-keys flow (admin-gated).
+#
+# The frontend in ``sentinelHub.ts`` no longer reads browser storage and no
+# longer forwards credentials — every dashboard request now lands in (2).
+# The require_local_operator gate (added in #303/PR #303) stays — both layers
+# are independent: the gate blocks anonymous callers, the env fallback lets
+# legitimate (gated) callers omit credentials from the body.
+# ---------------------------------------------------------------------------
+def _resolve_sentinel_credentials(body_id: str, body_secret: str) -> tuple[str, str]:
+    """Return (client_id, client_secret) using body values when present,
+    otherwise falling back to backend .env. Empty strings if neither is set."""
+    import os as _os
+    cid = (body_id or "").strip() or (_os.environ.get("SENTINEL_CLIENT_ID", "") or "").strip()
+    csec = (body_secret or "").strip() or (_os.environ.get("SENTINEL_CLIENT_SECRET", "") or "").strip()
+    return cid, csec
+
+
 @router.post("/api/sentinel/token", dependencies=[Depends(require_local_operator)])
 @limiter.limit("60/minute")
 async def api_sentinel_token(request: Request):
-    """Proxy Copernicus CDSE OAuth2 token request (avoids browser CORS block)."""
+    """Proxy Copernicus CDSE OAuth2 token request (avoids browser CORS block).
+
+    Credentials are resolved by ``_resolve_sentinel_credentials`` — body
+    fields are honored for back-compat, otherwise the backend .env values
+    populated through ``/api/settings/api-keys`` are used.
+    """
     import requests as req
     body = await request.body()
     from urllib.parse import parse_qs
     params = parse_qs(body.decode("utf-8"))
-    client_id = params.get("client_id", [""])[0]
-    client_secret = params.get("client_secret", [""])[0]
+    body_id = params.get("client_id", [""])[0]
+    body_secret = params.get("client_secret", [""])[0]
+    client_id, client_secret = _resolve_sentinel_credentials(body_id, body_secret)
     if not client_id or not client_secret:
-        raise HTTPException(400, "client_id and client_secret required")
+        # Friendly, non-hostile error — points the operator at the place
+        # they configure other API keys instead of just saying "required".
+        raise HTTPException(
+            400,
+            "Sentinel client_id/client_secret are not configured. "
+            "Set SENTINEL_CLIENT_ID and SENTINEL_CLIENT_SECRET in the "
+            "API Keys panel (Settings → API Keys) or your backend .env.",
+        )
     token_url = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
     try:
         resp = await asyncio.to_thread(req.post, token_url,
@@ -186,8 +228,11 @@ async def api_sentinel_tile(request: Request):
     except Exception:
         return JSONResponse(status_code=422, content={"ok": False, "detail": "invalid JSON body"})
 
-    client_id = body.get("client_id", "")
-    client_secret = body.get("client_secret", "")
+    # Issue #298: same resolution order as /api/sentinel/token — body
+    # values for back-compat, otherwise backend .env.
+    body_id = body.get("client_id", "")
+    body_secret = body.get("client_secret", "")
+    client_id, client_secret = _resolve_sentinel_credentials(body_id, body_secret)
     preset = body.get("preset", "TRUE-COLOR")
     date_str = body.get("date", "")
     z = body.get("z", 0)
@@ -195,7 +240,16 @@ async def api_sentinel_tile(request: Request):
     y = body.get("y", 0)
 
     if not client_id or not client_secret or not date_str:
-        raise HTTPException(400, "client_id, client_secret, and date required")
+        # Distinguish "no creds" from "no date" so the operator knows
+        # what to fix. Same friendly pointer as the /token route.
+        if not client_id or not client_secret:
+            raise HTTPException(
+                400,
+                "Sentinel client_id/client_secret are not configured. "
+                "Set SENTINEL_CLIENT_ID and SENTINEL_CLIENT_SECRET in the "
+                "API Keys panel (Settings → API Keys) or your backend .env.",
+            )
+        raise HTTPException(400, "date required")
 
     now = _time.time()
     credential_fp = _credential_fingerprint(client_id, client_secret)
