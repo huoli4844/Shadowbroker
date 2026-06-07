@@ -561,7 +561,11 @@ async def live_data(request: Request):
 
     payload = get_latest_data_deepcopy_snapshot()
     return Response(
-        content=orjson.dumps(_sanitize_payload(payload)),
+        content=orjson.dumps(
+            _sanitize_payload(payload),
+            default=str,
+            option=orjson.OPT_NON_STR_KEYS,
+        ),
         media_type="application/json",
         headers={"ETag": etag, "Cache-Control": "no-cache"},
     )

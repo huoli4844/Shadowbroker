@@ -3848,22 +3848,6 @@ async def update_layers(update: LayerUpdate, request: Request):
     return {"status": "ok"}
 
 
-@app.get("/api/live-data")
-@limiter.limit("120/minute")
-async def live_data(request: Request):
-    etag = _current_etag(prefix="live|full|")
-    if request.headers.get("if-none-match") == etag:
-        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
-    from services.fetchers._store import get_latest_data_deepcopy_snapshot
-
-    payload = get_latest_data_deepcopy_snapshot()
-    return Response(
-        content=orjson.dumps(_sanitize_payload(payload)),
-        media_type="application/json",
-        headers={"ETag": etag, "Cache-Control": "no-cache"},
-    )
-
-
 def _etag_response(request: Request, payload: dict, prefix: str = "", default=None):
     """Serialize once, use data version for ETag, return 304 or full response.
 

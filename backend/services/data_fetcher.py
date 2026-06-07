@@ -347,7 +347,14 @@ def _run_task_with_health_on_executor(
 
         record_success(task_name, duration_s=duration)
         if duration > _SLOW_FETCH_S:
-            logger.warning("task slow: %s took %.2f}s", task_name, duration)
+            logger.warning("task slow: %s took %.2fs", task_name, duration)
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        duration = time.perf_counter() - start
+        from services.fetch_health import record_failure
+
+        record_failure(task_name, error=TimeoutError(f"{task_name} timed out"), duration_s=duration)
+        logger.error("task timed out: %s (%.2fs)", task_name, duration)
     except Exception as e:
         duration = time.perf_counter() - start
         from services.fetch_health import record_failure
@@ -368,7 +375,8 @@ def _run_tasks(label: str, funcs: list, *, max_concurrency: int | None = None):
             max_concurrency = _STARTUP_HEAVY_CONCURRENCY
         else:
             max_concurrency = len(funcs)
-    max_concurrency = max(1, min(max_concurrency, len(funcs)))
+    pool_workers = getattr(executor, "_max_workers", len(funcs))
+    max_concurrency = max(1, min(max_concurrency, len(funcs), pool_workers))
 
     remaining_funcs = list(funcs)
     while remaining_funcs:
@@ -390,6 +398,13 @@ def _drain_task_futures(label: str, futures: dict):
             record_success(name, duration_s=duration)
             if duration > _SLOW_FETCH_S:
                 logger.warning(f"{label} task slow: {name} took {duration:.2f}s")
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            duration = time.perf_counter() - start
+            from services.fetch_health import record_failure
+
+            record_failure(name, error=TimeoutError(f"{name} timed out"), duration_s=duration)
+            logger.error("%s task timed out: %s (%.2fs)", label, name, duration)
         except Exception as e:
             duration = time.perf_counter() - start
             from services.fetch_health import record_failure

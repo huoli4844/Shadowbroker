@@ -230,12 +230,14 @@ _active_layers_version: int = 0
 def bump_active_layers_version() -> None:
     """Increment the active-layer version when frontend toggles change response shape."""
     global _active_layers_version
-    _active_layers_version += 1
+    with _data_lock:
+        _active_layers_version += 1
 
 
 def get_active_layers_version() -> int:
     """Return the current active-layer version (for ETag generation)."""
-    return _active_layers_version
+    with _data_lock:
+        return _active_layers_version
 
 
 def get_latest_data_subset(*keys: str) -> DashboardData:

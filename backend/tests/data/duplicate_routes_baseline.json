@@ -38,10 +38,6 @@
       "main",
       "routers.health"
     ],
-    "GET /api/live-data": [
-      "main",
-      "routers.data"
-    ],
     "GET /api/live-data/fast": [
       "main",
       "routers.data"
