@@ -466,13 +466,53 @@ def test_find_entity_prioritizes_aircraft_operator_and_callsign(sample_store, mo
 
     monkeypatch.setattr(telemetry, "get_data_version", lambda: 130)
 
-    by_operator = telemetry.find_entity(query="patriots jet", limit=5)
+    by_operator = telemetry.find_entity(owner="Patriots", limit=5)
     assert by_operator["best_match"]["group"] == "aircraft"
     assert by_operator["best_match"]["label"] == "OXE2116"
+
+    fuzzy = telemetry.find_entity(query="patriots jet", limit=5, fallback_search=True)
+    assert fuzzy["best_match"]["group"] == "aircraft"
 
     by_callsign = telemetry.find_entity(callsign="AF1", entity_type="aircraft", limit=5)
     assert by_callsign["best_match"]["callsign"] == "AF1"
     assert by_callsign["best_match"]["alert_operator"] == "POTUS"
+
+
+def test_find_entity_skips_fuzzy_when_exact_match(sample_store, monkeypatch):
+    import services.telemetry as telemetry
+
+    monkeypatch.setattr(telemetry, "get_data_version", lambda: 200)
+    calls: list[str] = []
+
+    def _fake_search(*_args, **_kwargs):
+        calls.append("search")
+        return {"results": [], "searched_layers": []}
+
+    monkeypatch.setattr(telemetry, "search_telemetry", _fake_search)
+
+    result = telemetry.find_entity(callsign="AF1", entity_type="aircraft", fallback_search=False)
+    assert result["best_match"]["callsign"] == "AF1"
+    assert calls == []
+
+
+def test_find_entity_fuzzy_only_when_fallback_or_empty(sample_store, monkeypatch):
+    import services.telemetry as telemetry
+
+    monkeypatch.setattr(telemetry, "get_data_version", lambda: 201)
+    calls: list[str] = []
+
+    def _fake_search(*_args, **_kwargs):
+        calls.append("search")
+        return {"results": [], "searched_layers": []}
+
+    monkeypatch.setattr(telemetry, "search_telemetry", _fake_search)
+
+    empty = telemetry.find_entity(query="zzzznonexistententity", fallback_search=False)
+    assert empty["best_match"] is None
+    assert calls == []
+
+    telemetry.find_entity(query="zzzznonexistententity", fallback_search=True)
+    assert calls == ["search"]
 
 
 def test_find_entity_prioritizes_maritime_owner_and_identifiers(sample_store, monkeypatch):

@@ -1549,11 +1549,13 @@ def find_entity(
     owner: str = "",
     layers: list[str] | tuple[str, ...] | None = None,
     limit: int = 10,
+    fallback_search: bool = False,
 ) -> dict[str, Any]:
     """Find a named entity across aircraft, maritime, and general telemetry.
 
     This is an intent-level lookup for agents. It tries high-precision
-    aircraft/ship fields first, then falls back to the universal search index.
+    aircraft/ship fields first, then optionally falls back to the universal
+    search index only when ``fallback_search`` is True (opt-in fuzzy scan).
     """
     effective_query = str(query or name or owner or callsign or registration or icao24 or mmsi or imo or "").strip()
     if not effective_query:
@@ -1628,16 +1630,18 @@ def find_entity(
                 seen.add(key)
                 results.append(normalized)
 
-    search_layers = requested_layers or _entity_layers_for_type(entity_type)
-    search_result = search_telemetry(query=effective_query, layers=search_layers, limit=limit)
-    if search_result.get("results"):
-        strategies.append("universal_index")
-    for item in search_result.get("results") or []:
-        normalized = _normalize_entity_result(item)
-        key = _entity_key(normalized)
-        if key not in seen:
-            seen.add(key)
-            results.append(normalized)
+    search_layers = list(requested_layers or _entity_layers_for_type(entity_type) or [])
+    search_result: dict[str, Any] = {"results": [], "searched_layers": search_layers}
+    if fallback_search:
+        search_result = search_telemetry(query=effective_query, layers=search_layers, limit=limit)
+        if search_result.get("results"):
+            strategies.append("universal_index")
+        for item in search_result.get("results") or []:
+            normalized = _normalize_entity_result(item)
+            key = _entity_key(normalized)
+            if key not in seen:
+                seen.add(key)
+                results.append(normalized)
 
     results.sort(
         key=lambda item: (

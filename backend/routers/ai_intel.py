@@ -2276,12 +2276,14 @@ async def agent_tool_manifest(request: Request):
 async def api_capabilities(request: Request):
     """Return full API manifest so the agent knows every available endpoint."""
     from services.openclaw_channel import READ_COMMANDS, WRITE_COMMANDS, detect_tier
+    from services.openclaw_routing import routing_manifest
     from services.config import get_settings
     tier = detect_tier()
     access_tier = str(get_settings().OPENCLAW_ACCESS_TIER or "restricted").strip().lower()
     return {
         "ok": True,
         "version": "0.9.82",
+        "routing": routing_manifest(),
         "auth": {
             "method": "HMAC-SHA256",
             "headers": ["X-SB-Timestamp", "X-SB-Nonce", "X-SB-Signature"],
@@ -2397,8 +2399,16 @@ async def api_capabilities(request: Request):
                     "description": "Compact server-side ship search by MMSI/IMO/name/query, including yacht-owner enrichment.",
                 },
                 "find_entity": {
-                    "args": {"query": "str (optional)", "entity_type": "aircraft|ship|person|event|infrastructure (optional)", "callsign": "str (optional)", "registration": "str (optional)", "icao24": "str (optional)", "mmsi": "str (optional)", "imo": "str (optional)", "name": "str (optional)", "owner": "str (optional)", "layers": "list[str] (optional)", "limit": "int (default 10)"},
-                    "description": "Exact-first resolver for planes, ships, operators, callsigns, registrations, MMSI/IMO, and named entities. Use before tracking to avoid fuzzy prompt matching.",
+                    "args": {"query": "str (optional)", "entity_type": "aircraft|ship|person|event|infrastructure (optional)", "callsign": "str (optional)", "registration": "str (optional)", "icao24": "str (optional)", "mmsi": "str (optional)", "imo": "str (optional)", "name": "str (optional)", "owner": "str (optional)", "layers": "list[str] (optional)", "limit": "int (default 10)", "fallback_search": "bool (default false)", "confirm_fuzzy": "bool (alias for fallback_search)"},
+                    "description": "Exact-first resolver for planes, ships, operators, callsigns, registrations, MMSI/IMO, and named entities. Skips fuzzy search unless fallback_search=true or no exact match.",
+                },
+                "route_query": {
+                    "args": {"text": "str", "lat": "float (optional)", "lng": "float (optional)", "radius_km": "float (default 50)", "compact": "bool (default true)"},
+                    "description": "Deterministic intent router — returns recommended fast command, alternates, and latency estimate. Preferred entry for natural-language reads.",
+                },
+                "run_playbook": {
+                    "args": {"name": "str", "query": "str (optional)", "lat": "float (optional)", "lng": "float (optional)"},
+                    "description": "Execute a named batch plan (hot_snapshot, morning_brief, monitor_heartbeat, track_snapshot, area_brief, entity_recon).",
                 },
                 "correlate_entity": {
                     "args": {"query": "str (optional)", "entity_type": "str (optional)", "callsign": "str (optional)", "registration": "str (optional)", "icao24": "str (optional)", "mmsi": "str (optional)", "imo": "str (optional)", "name": "str (optional)", "owner": "str (optional)", "radius_km": "float (default 100)", "limit": "int (default 10)"},
@@ -2578,7 +2588,8 @@ async def api_capabilities(request: Request):
                           "layers are serialized, unchanged layers transfer zero bytes. The client tracks versions "
                           "automatically from SSE events and previous responses. "
                           "3) Pass compact=true on every read command for compressed_v1 responses (~60-90% smaller). "
-                          "4) Use targeted commands first (find_flights, search_telemetry, entities_near). "
+                          "4) Use route_query / find_entity / run_playbook before search_telemetry. "
+                          "Expensive commands require confirm_expensive=true. "
                           "Reserve get_telemetry/get_slow_telemetry for rare full-context pulls.",
             "pins": "Pins are server-side, NOT localStorage. Use place_pin command or POST /api/ai/pins. The agent can place and delete pins.",
             "tracking": "To track a specific aircraft without polling: use add_watch with track_callsign or track_registration. Over SSE, you'll get instant push alerts.",

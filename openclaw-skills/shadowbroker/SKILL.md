@@ -14,6 +14,44 @@ running on `localhost:8000`. It tracks military flights, ships, satellites, SIGI
 earthquakes, fires, GDELT conflict events, prediction markets, and 30+ other data
 layers — all with geographic coordinates.
 
+## Agent Fast Path (read first)
+
+ShadowBroker exposes dozens of read commands. **Do not explore them.** Use the
+three-tool surface:
+
+| Tool | When |
+|------|------|
+| `await sb.ask("natural language question")` | **Default for reads** — server routes to fastest command |
+| `await sb.run_playbook("hot_snapshot")` | Pre-batched snapshots (morning brief, monitor poll, status) |
+| `await sb.channel_status()` | Liveness (~5 ms) — never `/api/health` |
+
+**Latency tiers:** `find_entity` / `find_flights` / `search_news` / `entities_near` → **⚡ &lt;30 ms**.
+`search_telemetry` / `get_telemetry` / `get_report` → **🔴 seconds** — blocked unless `confirm_expensive=true`.
+
+```python
+# Default read path (route + execute)
+answer = await sb.ask("where is the Patriots jet")
+
+# Named batch plans
+brief = await sb.run_playbook("hot_snapshot")
+monitor = await sb.run_playbook("monitor_heartbeat")
+
+# Structured lookup when you already parsed fields
+entity = await sb.send_command("find_entity", {"owner": "musk", "compact": True})
+
+# Multi-command — always batch, never sequential loops
+batch = await sb.send_batch([
+    {"cmd": "get_summary", "args": {"compact": True}},
+    {"cmd": "what_changed", "args": {"compact": True}},
+])
+```
+
+**Playbooks:** `hot_snapshot`, `morning_brief`, `status_check`, `monitor_heartbeat`, `track_snapshot`, `area_brief`, `entity_recon`.
+
+**Anti-patterns:** `search_telemetry` for known tail numbers; `get_telemetry` for routine polls; sequential `send_command` loops; empty `layers: []` on `get_layer_slice`.
+
+Load machine-readable routing hints once: `GET /api/ai/capabilities` → `routing`.
+
 ## How to Use This Skill
 
 Import the client and call methods:
@@ -118,8 +156,11 @@ The channel operates over HMAC-authenticated HTTP with body-integrity binding:
 | `sb.stream_updates()` | SSE push: `layer_changed`, alerts, tasks | **Open first, keep open** — tells you exactly which layers updated |
 | `await sb.get_layer_slice(["ships", "gdelt"])` | Only the requested layers, with per-layer incremental | **Primary fetch method** — automatically skips layers you already have |
 | `await sb.send_command("get_summary")` | Lightweight counts-only summary | Discover what data exists before pulling anything |
+| `await sb.ask("...")` | **Route + execute** | **Default** for natural-language reads |
+| `await sb.send_command("find_entity", {...})` | Exact-first entity resolver | Parsed person/tail/callsign/MMSI — skips fuzzy unless `fallback_search=true` |
 | `await sb.send_command("find_flights", {...})` | Targeted flight search | When you know the domain (callsign, tail number) |
-| `await sb.send_command("search_telemetry", {...})` | Cross-layer keyword search | When you don't know which layer has the answer |
+| `await sb.send_command("route_query", {...})` | Routing plan only | Inspect recommended command before executing |
+| `await sb.send_command("search_telemetry", {...})` | Cross-layer fuzzy search | **Last resort** — requires `confirm_expensive=true` |
 
 **Full telemetry dumps (use sparingly — large payloads):**
 
@@ -598,10 +639,10 @@ When the user asks a question, follow this decision tree:
      fresh data, pushes alerts instantly, and eliminates blind polling.
 
 2. **Does ShadowBroker have this data already?**
-   - **Start with `get_summary()`** to see what layers are populated and their counts.
-   - **Known domain** (flight callsign, ship name, keyword) → use the targeted command:
-     `find_flights`, `find_ships`, `search_news`, `entities_near`, `search_telemetry`
-   - **Unknown domain** → `search_telemetry` (cross-layer keyword search, ranked results)
+   - **Natural language** → `await sb.ask(question)` (routes server-side)
+   - **Batch snapshot** → `await sb.run_playbook("hot_snapshot")`
+   - **Known domain** → `find_entity`, `find_flights`, `find_ships`, `search_news`, `entities_near`
+   - **Unknown domain** → `find_entity` first; only then `search_telemetry` with `confirm_expensive=true`
    - **Need specific layers** → `get_layer_slice(["military_flights", "gdelt"])` — only
      fetches layers that changed since your last call (per-layer incremental).
    - **Near a location** → `entities_near()` or `get_near_me()` (scans all layers within radius)
