@@ -91,6 +91,7 @@ import {
   rotateWormholePairwiseAlias,
   listWormholeGatePersonas,
   postWormholeGateMessage,
+  prepareWormholeInteractiveLane,
   recoverWormholeSasRootContinuity,
   resyncWormholeGateState,
   retireWormholeGatePersona,
@@ -317,7 +318,7 @@ function errorMessage(err: unknown, fallback: string = 'unknown error'): string 
 
 function describeMeshChatControlError(raw: string): string {
   const message = String(raw || '').trim();
-  if (!message) return 'MeshChat could not update the local control plane.';
+  if (!message) return 'Meshtastic Chat could not update the local control plane.';
   if (
     message === 'control_plane_request_failed:530' ||
     message === 'HTTP 530' ||
@@ -336,7 +337,7 @@ function describeMeshChatControlError(raw: string): string {
     return 'This control action needs a local operator session. Open Settings or Node controls once so the app can authorize local changes, then try Mesh again.';
   }
   if (message.startsWith('{') || message.startsWith('<')) {
-    return 'MeshChat could not update the local control plane. Check the backend log for the upstream error.';
+    return 'Meshtastic Chat could not update the local control plane. Check the backend log for the upstream error.';
   }
   return message;
 }
@@ -413,7 +414,7 @@ export function useMeshChatController({
     setInternalExpanded(newVal);
     onExpandedChange?.(newVal);
   };
-  const [activeTab, setActiveTab] = useState<Tab>('meshtastic');
+  const [activeTab, setActiveTab] = useState<Tab>('dms');
   const openTerminal = useCallback(() => {
     if (onTerminalToggle) {
       onTerminalToggle();
@@ -471,7 +472,6 @@ export function useMeshChatController({
   const privateInfonetReady = wormholeEnabled && wormholeReadyState;
   const publicMeshBlockedByWormhole = wormholeEnabled || wormholeReadyState;
   const dmSendQueue = useRef<(() => Promise<void>)[]>([]);
-  const infonetAutoBootstrapRef = useRef(false);
   const meshMqttRuntime = meshMqttSettings?.runtime;
   const meshMqttEnabled = Boolean(meshMqttSettings?.enabled || meshMqttRuntime?.enabled);
   const canUsePublicMeshInput = Boolean(activePublicMeshAddress) && meshMqttEnabled && !publicMeshBlockedByWormhole;
@@ -905,6 +905,7 @@ export function useMeshChatController({
   // ─── InfoNet State ───────────────────────────────────────────────────────
   const [gates, setGates] = useState<Gate[]>([]);
   const [selectedGate, setSelectedGate] = useState<string>('');
+  const [infonetLaunchGate, setInfonetLaunchGate] = useState('');
   const [infoMessages, setInfoMessages] = useState<InfoNetMessage[]>([]);
   const [infoVerification, setInfoVerification] = useState<
     Record<string, 'verified' | 'failed' | 'unsigned'>
@@ -1335,7 +1336,7 @@ export function useMeshChatController({
     setExpanded(true);
     setActiveTab(launchRequest.tab);
     if (launchRequest.tab === 'infonet' && launchRequest.gate) {
-      setSelectedGate(String(launchRequest.gate || '').trim().toLowerCase());
+      setInfonetLaunchGate(String(launchRequest.gate || '').trim().toLowerCase());
     }
     if (launchRequest.tab === 'dms') {
       const peerId = String(launchRequest.peerId || '').trim();
@@ -2682,7 +2683,7 @@ export function useMeshChatController({
             openIdentityWizard({
               type: 'err',
               text: hasStoredPublicLaneIdentity
-                ? 'Quick fix: turn MeshChat on below, then retry your send.'
+                ? 'Quick fix: turn Meshtastic Chat on below, then retry your send.'
                 : 'Quick fix: create a public mesh identity below, then retry your send.',
             });
             setTimeout(() => setSendError(''), 4000);
@@ -4122,10 +4123,9 @@ export function useMeshChatController({
   const dmTrustHint = buildDmTrustHint(selectedContactInfo);
   const dmTrustPrimaryAction = dmTrustPrimaryActionLabel(selectedContactInfo);
   const wormholeDescriptor = getWormholeIdentityDescriptor();
-  const dashboardRestrictedTab: boolean = activeTab === 'infonet';
-  const dashboardRestrictedTitle = 'INFONET RESTRICTED';
-  const dashboardRestrictedDetail =
-    'Private Wormhole gate activity is staying in the terminal for this build. Dashboard integration is coming soon.';
+  const dashboardRestrictedTab = false;
+  const dashboardRestrictedTitle = '';
+  const dashboardRestrictedDetail = '';
   const selectedGateKey = selectedGate.trim().toLowerCase();
   const selectedGatePersonaList = selectedGateKey ? gatePersonas[selectedGateKey] || [] : [];
   const selectedGateActivePersonaId = selectedGateKey ? activeGatePersonaId[selectedGateKey] || '' : '';
@@ -4223,7 +4223,7 @@ export function useMeshChatController({
         (wormholeEnabled && !wormholeReadyState) ||
         anonymousDmBlocked));
   const privateInfonetBlockedDetail = !wormholeEnabled
-    ? 'INFONET now lives behind Wormhole. Public mesh remains available under the MESH tab.'
+    ? 'INFONET now lives behind Wormhole. Meshtastic radio chat remains available under the MESHTASTIC tab.'
     : !wormholeReadyState
       ? 'Wormhole is enabled, but the local private agent is not ready yet. INFONET stays locked until the private lane is up.'
       : 'Wormhole is up, but Reticulum is still warming on the private lane. Gate chat can run in transitional mode while strongest transport posture comes online. For strongest content privacy, use Dead Drop.';
@@ -4383,13 +4383,13 @@ export function useMeshChatController({
       setMeshSessionActive(true);
       setMeshMessages([]);
       setSendError('');
-      const text = `MeshChat is on. Address ${readyAddress}.`;
+      const text = `Meshtastic Chat is on. Address ${readyAddress}.`;
       setIdentityWizardStatus({ type: 'ok', text });
       setMeshQuickStatus(null);
       return { ok: true as const, text };
     } catch (err) {
       const message = describeMeshChatControlError(errorMessage(err));
-      const text = `Could not turn MeshChat on: ${message}`;
+      const text = `Could not turn Meshtastic Chat on: ${message}`;
       setIdentityWizardStatus({ type: 'err', text });
       setMeshQuickStatus({ type: 'err', text });
       return { ok: false as const, text };
@@ -4520,21 +4520,58 @@ export function useMeshChatController({
     }
   }, [wormholeDescriptor?.nodeId, wormholeEnabled, wormholeReadyState]);
 
-  useEffect(() => {
-    if (!expanded || activeTab !== 'infonet') {
-      infonetAutoBootstrapRef.current = false;
+  const enterInfonetWormholeLane = useCallback(async () => {
+    setMeshSessionActive(false);
+    setMeshMessages([]);
+    if (wormholeEnabled && wormholeReadyState) {
+      try {
+        const wormholeIdentity = await fetchWormholeIdentity();
+        setIdentity({
+          publicKey: wormholeIdentity.public_key,
+          privateKey: '',
+          nodeId: wormholeIdentity.node_id,
+        });
+      } catch {
+        // Lane is already up; shell can still open.
+      }
       return;
     }
-    if (privateInfonetReady) {
-      infonetAutoBootstrapRef.current = false;
-      return;
+
+    setIdentityWizardBusy(true);
+    try {
+      const prepared = await prepareWormholeInteractiveLane({ bootstrapIdentity: true });
+      const [settings, runtime] = await Promise.all([
+        fetchWormholeSettings(true).catch(() => null),
+        fetchWormholeStatus().catch(() => null),
+      ]);
+      const enabled = Boolean(
+        settings?.enabled ?? prepared.settingsEnabled ?? runtime?.running ?? runtime?.ready,
+      );
+      setSecureModeCached(enabled);
+      setWormholeEnabled(enabled);
+      setWormholeReadyState(Boolean(runtime?.ready ?? prepared.ready));
+      setWormholeRnsReady(Boolean(runtime?.rns_ready));
+      setWormholeRnsDirectReady(Boolean(runtime?.rns_private_dm_direct_ready));
+      setWormholeRnsPeers({
+        active: Number(runtime?.rns_active_peers ?? 0),
+        configured: Number(runtime?.rns_configured_peers ?? 0),
+      });
+      if (prepared.identity) {
+        purgeBrowserSigningMaterial();
+        purgeBrowserContactGraph();
+        await purgeBrowserDmState();
+        const hydratedContacts = await hydrateWormholeContacts(true);
+        setContacts(hydratedContacts);
+        setIdentity({
+          publicKey: prepared.identity.public_key,
+          privateKey: '',
+          nodeId: prepared.identity.node_id,
+        });
+      }
+    } finally {
+      setIdentityWizardBusy(false);
     }
-    if (identityWizardBusy || infonetAutoBootstrapRef.current) return;
-    infonetAutoBootstrapRef.current = true;
-    void handleBootstrapPrivateIdentity().catch(() => {
-      infonetAutoBootstrapRef.current = false;
-    });
-  }, [activeTab, expanded, handleBootstrapPrivateIdentity, identityWizardBusy, privateInfonetReady]);
+  }, [wormholeEnabled, wormholeReadyState]);
 
   return {
     // UI state
@@ -4723,6 +4760,9 @@ export function useMeshChatController({
     handleLeaveWormholeForPublicMesh,
     handleResetPublicIdentity,
     handleBootstrapPrivateIdentity,
+    enterInfonetWormholeLane,
+    infonetLaunchGate,
+    clearInfonetLaunchGate: () => setInfonetLaunchGate(''),
     handleRefreshSelectedContact,
     handleResetSelectedContact,
     handleTrustSelectedRemotePrekey,

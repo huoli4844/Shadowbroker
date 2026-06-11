@@ -137,6 +137,9 @@ interface CommandHistory {
 
 interface InfonetShellProps {
   isOpen: boolean;
+  embedded?: boolean;
+  launchGate?: string;
+  onLaunchGateConsumed?: () => void;
   onClose: () => void;
   onOpenLiveGate?: (gate: string) => void;
   onOpenDeadDrop?: (peerId: string, options?: { showSas?: boolean }) => void;
@@ -144,6 +147,9 @@ interface InfonetShellProps {
 
 export default function InfonetShell({
   isOpen,
+  embedded = false,
+  launchGate = '',
+  onLaunchGateConsumed,
   onClose,
   onOpenLiveGate,
   onOpenDeadDrop,
@@ -176,6 +182,7 @@ export default function InfonetShell({
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const gateLaunchAttemptRef = useRef(0);
+  const launchGateConsumedRef = useRef('');
 
   // Real mesh identity
   const nodeIdentity = useMemo(() => getNodeIdentity(), []);
@@ -203,6 +210,7 @@ export default function InfonetShell({
     setPendingGate(null);
     setInput('');
     gateLaunchAttemptRef.current += 1;
+    launchGateConsumedRef.current = '';
     setIsBooting(true);
     setBootText([]);
 
@@ -600,6 +608,14 @@ export default function InfonetShell({
     setHistory(prev => [...prev, { command: cmd, output }]);
   };
 
+  useEffect(() => {
+    const gate = String(launchGate || '').trim().toLowerCase();
+    if (!isOpen || isBooting || !gate || launchGateConsumedRef.current === gate) return;
+    launchGateConsumedRef.current = gate;
+    handleCommand(`join ${gate}`);
+    onLaunchGateConsumed?.();
+  }, [isOpen, isBooting, launchGate, onLaunchGateConsumed]);
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
       if (inputMode === 'normal' && input.startsWith('g/') && searchMatch) {
@@ -635,7 +651,12 @@ export default function InfonetShell({
   }
 
   return (
-    <div ref={containerRef} className="h-full bg-[#0a0a0a] text-gray-300 p-4 md:p-8 font-mono relative flex flex-col overflow-hidden">
+    <div
+      ref={containerRef}
+      className={`h-full min-h-0 bg-[#0a0a0a] text-gray-300 font-mono relative flex flex-col overflow-hidden ${
+        embedded ? 'p-2 md:p-3 text-[13px]' : 'p-4 md:p-8'
+      }`}
+    >
       {currentView === 'terminal' && (
         <>
           {/* Top Navigation / Quick Launch */}

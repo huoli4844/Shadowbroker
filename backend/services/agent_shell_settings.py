@@ -16,7 +16,13 @@ _LOCK = threading.Lock()
 
 
 def _default_working_directory() -> str:
-    return os.environ.get("AGENT_SHELL_DEFAULT_CWD") or os.environ.get("HOME") or "/app"
+    explicit = str(os.environ.get("AGENT_SHELL_DEFAULT_CWD") or "").strip()
+    if explicit and os.path.isdir(explicit):
+        return explicit
+    home = str(os.environ.get("HOME") or "").strip()
+    if home and home != "/nonexistent" and os.path.isdir(home):
+        return home
+    return "/app"
 
 
 def get_agent_shell_settings() -> dict[str, Any]:

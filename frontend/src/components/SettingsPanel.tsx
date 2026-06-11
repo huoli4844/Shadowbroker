@@ -1905,7 +1905,7 @@ const SettingsPanel = React.memo(function SettingsPanel({
                         </div>
                         <div className="text-[var(--text-muted)] leading-relaxed">
                           Mesh Terminal stays read-only for sensitive posting and DM actions while
-                          the hidden transport policy is active. Use MeshChat for the hardened path.
+                          the hidden transport policy is active. Use Meshtastic Chat for the hardened path.
                         </div>
                         <div className="text-[var(--text-muted)] leading-relaxed">
                           Relay fallback reduces metadata protection compared with direct obfuscated

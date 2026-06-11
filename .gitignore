@@ -261,6 +261,11 @@ frontend/.desktop-export-stash-*/
 backend/data/wormhole_stderr.log
 backend/data/wormhole_stdout.log
 
+# Hermes Agent (operator-local runtime install — not project source)
+.hermes/
+**/.hermes/
+hermes-agent/
+
 # Runtime caches that already slip through the backend/data/* blanket
 # (these are caught by the wildcard but listing for clarity)
 

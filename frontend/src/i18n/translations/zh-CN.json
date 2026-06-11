@@ -240,7 +240,7 @@
     "disconnected": "未连接"
   },
   "meshChat": {
-    "title": "Mesh 聊天",
+    "title": "Meshtastic 聊天",
     "infonet": "Infonet",
     "meshtastic": "Meshtastic",
     "deadDrop": "死信箱",

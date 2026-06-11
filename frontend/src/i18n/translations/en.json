@@ -240,7 +240,7 @@
     "disconnected": "Disconnected"
   },
   "meshChat": {
-    "title": "Mesh Chat",
+    "title": "Meshtastic Chat",
     "infonet": "Infonet",
     "meshtastic": "Meshtastic",
     "deadDrop": "Dead Drop",

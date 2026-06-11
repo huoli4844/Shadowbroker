@@ -43,9 +43,32 @@ def _set_winsize(fd: int, rows: int, cols: int) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
 
 
+def _published_local_dashboard_ws(ws: WebSocket) -> bool:
+    """Browser → published Docker port appears as a bridge IP, not loopback.
+
+    For the operator shell only, also accept when the upgrade request clearly
+    targets the local dashboard (Host/Origin on localhost).
+    """
+    host_header = str(ws.headers.get("host") or "").strip().lower()
+    host_name = host_header.split(":", 1)[0]
+    if host_name in {"127.0.0.1", "localhost", "::1"}:
+        return True
+
+    origin = str(ws.headers.get("origin") or "").strip().lower()
+    if origin.startswith("http://127.0.0.1:") or origin.startswith("http://localhost:"):
+        return True
+    if origin.startswith("https://127.0.0.1:") or origin.startswith("https://localhost:"):
+        return True
+    return False
+
+
 async def _authorize_agent_shell_ws(ws: WebSocket, admin_key_query: str = "") -> None:
     host = (ws.client.host or "").lower() if ws.client else ""
-    if _is_trusted_local_runtime_host(host) or (_debug_mode_enabled() and host == "test"):
+    if (
+        _is_trusted_local_runtime_host(host)
+        or _published_local_dashboard_ws(ws)
+        or (_debug_mode_enabled() and host == "test")
+    ):
         return
     admin_key = _current_admin_key()
     presented = str(admin_key_query or ws.headers.get("x-admin-key", "") or "").strip()
@@ -164,6 +187,18 @@ async def agent_shell_websocket(
     env = os.environ.copy()
     env.setdefault("TERM", "xterm-256color")
     env.setdefault("COLORTERM", "truecolor")
+    home = shell_cwd if os.path.isdir(shell_cwd) else "/app"
+    env["HOME"] = home
+    env["USER"] = env.get("USER") or "operator"
+    path_prefixes = [
+        os.path.join(home, ".local", "bin"),
+        os.path.join(home, ".hermes", "bin"),
+    ]
+    path = env.get("PATH", "")
+    for prefix in path_prefixes:
+        if os.path.isdir(prefix):
+            path = f"{prefix}:{path}" if path else prefix
+    env["PATH"] = path
 
     proc = await asyncio.create_subprocess_exec(
         shell,

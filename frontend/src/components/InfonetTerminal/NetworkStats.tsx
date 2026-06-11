@@ -13,11 +13,12 @@ interface Stats {
   seedPeers: number;
   nodeEnabled: boolean;
   syncOutcome: string;
+  syncError: string;
 }
 
 const EMPTY: Stats = {
   meshtastic: 0, aprs: 0, ledgerNodes: 0, infonetEvents: 0,
-  syncPeers: 0, seedPeers: 0, nodeEnabled: false, syncOutcome: 'offline',
+  syncPeers: 0, seedPeers: 0, nodeEnabled: false, syncOutcome: 'offline', syncError: '',
 };
 
 export default function NetworkStats() {
@@ -41,6 +42,7 @@ export default function NetworkStats() {
           ?? infonet?.bootstrap?.default_sync_peer_count
           ?? 0,
         );
+        const syncOutcome = String(infonet?.sync_runtime?.last_outcome || 'offline').toLowerCase();
         setStats({
           meshtastic: Number(channelsRes?.total_live || channelsRes?.total_nodes || meshRes?.signal_counts?.meshtastic || 0),
           aprs: Number(meshRes?.signal_counts?.aprs || 0),
@@ -49,26 +51,36 @@ export default function NetworkStats() {
           syncPeers: syncPeerCount,
           seedPeers: seedPeerCount,
           nodeEnabled: Boolean(infonet?.node_enabled),
-          syncOutcome: String(infonet?.sync_runtime?.last_outcome || 'offline').toLowerCase(),
+          syncOutcome,
+          syncError: String(infonet?.sync_runtime?.last_error || '').trim(),
         });
       } catch { /* ignore */ }
     };
     poll();
-    const interval = setInterval(poll, 15000);
+    const interval = setInterval(poll, 8000);
     return () => { alive = false; clearInterval(interval); };
   }, []);
 
-  const nodeColor = stats.syncOutcome === 'ok' ? 'text-green-400'
+  const syncErrorLower = stats.syncError.toLowerCase();
+  const artiBlocked = syncErrorLower.includes('arti') || syncErrorLower.includes('onion');
+  const nodeColor = stats.syncOutcome === 'ok' || stats.syncOutcome === 'solo' ? 'text-green-400'
     : stats.syncOutcome === 'running' ? 'text-amber-400'
     : stats.nodeEnabled ? 'text-amber-400' : 'text-gray-600';
   const nodeLabel = stats.syncOutcome === 'ok' ? 'SEED SYNCED'
+    : stats.syncOutcome === 'solo' ? 'SOLO'
     : stats.syncOutcome === 'running' ? 'SYNCING'
-    : stats.syncOutcome === 'error' || stats.syncOutcome === 'fork' ? 'RETRYING'
+    : stats.syncOutcome === 'error' || stats.syncOutcome === 'fork'
+      ? (artiBlocked ? 'ARTI WARMING' : 'SYNC BACKOFF')
     : stats.nodeEnabled ? 'WAITING' : 'OFFLINE';
+  const nodeTitle = stats.syncError
+    ? `Infonet seed sync: ${stats.syncError}`
+    : stats.nodeEnabled
+      ? 'Participant node enabled; waiting for seed ledger sync.'
+      : 'Participant node offline.';
 
   return (
     <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-1 mt-5 text-sm font-mono text-gray-500">
-      <span>NODE <span className={nodeColor}>{nodeLabel}</span></span>
+      <span title={nodeTitle}>NODE <span className={nodeColor}>{nodeLabel}</span></span>
       <span className="text-gray-700">|</span>
       <span>MESH <span className={stats.meshtastic > 0 ? 'text-green-400' : 'text-gray-600'}>{stats.meshtastic.toLocaleString()}</span></span>
       <span className="text-gray-700">|</span>

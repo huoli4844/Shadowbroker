@@ -615,7 +615,7 @@ export default function Dashboard() {
                 )}
               </div>
 
-              {/* 2. MESH CHAT (Middle) */}
+              {/* 2. MESHTASTIC CHAT (Middle) */}
               {secondaryBootReady && (
                 <div className="contents" style={{ direction: 'ltr' }}>
                   <MeshChat
@@ -624,6 +624,8 @@ export default function Dashboard() {
                     onExpandedChange={setLeftMeshExpanded}
                     onSettingsClick={() => setSettingsOpen(true)}
                     onTerminalToggle={openSecureTerminalLauncher}
+                    onOpenLiveGate={openLiveGateFromShell}
+                    onOpenDeadDrop={openDeadDropFromShell}
                     launchRequest={meshChatLaunchRequest}
                   />
                 </div>

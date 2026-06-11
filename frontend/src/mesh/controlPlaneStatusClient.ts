@@ -1,4 +1,5 @@
 import { controlPlaneJson } from '@/lib/controlPlane';
+import { generateNodeKeys, getNodeIdentity } from '@/mesh/meshIdentity';
 
 export interface PrivacyProfileSnapshot {
   profile?: string;
@@ -235,4 +236,14 @@ export async function startTorHiddenService(): Promise<TorHiddenServiceSnapshot>
     method: 'POST',
     requireAdminSession: false,
   });
+}
+
+/** Warm Tor/Arti and (re)enable the participant node so Infonet seed sync can run. */
+export async function ensureInfonetParticipantNodeReady(): Promise<void> {
+  if (!getNodeIdentity()) {
+    await generateNodeKeys().catch(() => null);
+  }
+  await startTorHiddenService().catch(() => null);
+  await setInfonetNodeEnabled(true);
+  await fetchInfonetNodeStatusSnapshot(true).catch(() => null);
 }
