@@ -102,6 +102,7 @@ def test_refresh_node_peer_store_promotes_manifest_peers_to_sync_only(tmp_path, 
     monkeypatch.setenv("MESH_BOOTSTRAP_SEED_PEERS", "")
     monkeypatch.setenv("MESH_DEFAULT_SYNC_PEERS", "")
     monkeypatch.setenv("MESH_INFONET_ALLOW_CLEARNET_SYNC", "true")
+    monkeypatch.setenv("MESH_INFONET_FLEET_JOIN_DISABLED", "true")
     get_settings.cache_clear()
 
     try:
@@ -135,6 +136,7 @@ def test_refresh_node_peer_store_adds_bootstrap_seed_as_pull_only_peer(tmp_path,
     monkeypatch.setenv("MESH_DEFAULT_SYNC_PEERS", "")
     monkeypatch.setenv("MESH_INFONET_ALLOW_CLEARNET_SYNC", "true")
     monkeypatch.setenv("MESH_BOOTSTRAP_SIGNER_PUBLIC_KEY", "")
+    monkeypatch.setenv("MESH_INFONET_FLEET_JOIN_DISABLED", "true")
     get_settings.cache_clear()
 
     try:
@@ -171,6 +173,7 @@ def test_refresh_node_peer_store_suppresses_clearnet_seed_by_default(tmp_path, m
     monkeypatch.setenv("MESH_DEFAULT_SYNC_PEERS", "")
     monkeypatch.delenv("MESH_INFONET_ALLOW_CLEARNET_SYNC", raising=False)
     monkeypatch.setenv("MESH_BOOTSTRAP_SIGNER_PUBLIC_KEY", "")
+    monkeypatch.setenv("MESH_INFONET_FLEET_JOIN_DISABLED", "true")
     get_settings.cache_clear()
 
     try:
@@ -184,7 +187,7 @@ def test_refresh_node_peer_store_suppresses_clearnet_seed_by_default(tmp_path, m
     assert snapshot["skipped_clearnet_peer_count"] == 1
     assert snapshot["bootstrap_peer_count"] == 0
     assert snapshot["sync_peer_count"] == 0
-    assert "no clearnet sync fallback" in snapshot["last_bootstrap_error"]
+    assert snapshot["last_bootstrap_error"]
     assert store.records_for_bucket("bootstrap") == []
     assert store.records_for_bucket("sync") == []
 

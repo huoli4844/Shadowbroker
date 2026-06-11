@@ -50,7 +50,9 @@ def _manifest_path() -> str:
 
 
 def _signer_public_key_b64() -> str:
-    return str(getattr(get_settings(), "MESH_BOOTSTRAP_SIGNER_PUBLIC_KEY", "") or "").strip()
+    from services.mesh.mesh_fleet_defaults import effective_bootstrap_signer_public_key_b64
+
+    return effective_bootstrap_signer_public_key_b64()
 
 
 def _signer_private_key_b64() -> str:
@@ -67,10 +69,14 @@ def _private_transport_required() -> bool:
 
 
 def _configured_seed_peer_urls() -> list[str]:
+    from services.mesh.mesh_fleet_defaults import configured_bootstrap_seed_peers_with_fleet_default
+
     settings = get_settings()
     primary = str(getattr(settings, "MESH_BOOTSTRAP_SEED_PEERS", "") or "").strip()
     legacy = str(getattr(settings, "MESH_DEFAULT_SYNC_PEERS", "") or "").strip()
-    return parse_configured_relay_peers(primary or legacy)
+    return configured_bootstrap_seed_peers_with_fleet_default(
+        parse_configured_relay_peers(primary or legacy)
+    )
 
 
 def _seed_manifest_peers() -> list[dict[str, str]]:

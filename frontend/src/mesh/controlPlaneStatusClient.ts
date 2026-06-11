@@ -249,12 +249,41 @@ export async function startTorHiddenService(): Promise<TorHiddenServiceSnapshot>
   });
 }
 
-/** Warm Tor/Arti and (re)enable the participant node so Infonet seed sync can run. */
+export interface InfonetSwarmJoinSnapshot {
+  ok?: boolean;
+  detail?: string;
+  announce?: {
+    ok?: boolean;
+    peer_url?: string;
+    skipped?: boolean;
+    results?: Array<{ seed_peer_url?: string; ok?: boolean; status_code?: number }>;
+  };
+  manifest_pull?: {
+    ok?: boolean;
+    peer_count?: number;
+    merged_peer_count?: number;
+    seed_peer_url?: string;
+    detail?: string;
+  };
+}
+
+/** Register with the fleet seed and pull the signed peer manifest. */
+export async function joinInfonetSwarm(): Promise<InfonetSwarmJoinSnapshot> {
+  const result = await controlPlaneJson<InfonetSwarmJoinSnapshot>('/api/mesh/infonet/swarm/join', {
+    method: 'POST',
+    requireAdminSession: false,
+  });
+  invalidateInfonetNodeStatusCache();
+  return result;
+}
+
+/** Warm Tor/Arti, enable the node, and join the private Infonet swarm. */
 export async function ensureInfonetParticipantNodeReady(): Promise<void> {
   if (!getNodeIdentity()) {
     await generateNodeKeys().catch(() => null);
   }
   await startTorHiddenService().catch(() => null);
   await setInfonetNodeEnabled(true);
+  await joinInfonetSwarm().catch(() => null);
   await fetchInfonetNodeStatusSnapshot(true).catch(() => null);
 }

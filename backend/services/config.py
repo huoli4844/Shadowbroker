@@ -43,8 +43,14 @@ class Settings(BaseSettings):
     MESH_INFONET_ALLOW_CLEARNET_SYNC: bool = False
     MESH_BOOTSTRAP_DISABLED: bool = False
     MESH_BOOTSTRAP_MANIFEST_PATH: str = "data/bootstrap_peers.json"
-    MESH_BOOTSTRAP_SIGNER_PUBLIC_KEY: str = ""
+    # Public sb-testnet-0 fleet signer (participants). Seed operator holds the private key.
+    MESH_BOOTSTRAP_SIGNER_PUBLIC_KEY: str = (
+        "ul1d0kj/ODPIp0OhHzX8eLAVXzJ3CVvzW1vn2IC6q3I="
+    )
     MESH_BOOTSTRAP_SIGNER_PRIVATE_KEY: str = ""
+    # When true, empty MESH_PEER_PUSH_SECRET uses the public fleet HMAC for seed join/announce.
+    MESH_INFONET_FLEET_JOIN: bool = True
+    MESH_INFONET_FLEET_JOIN_DISABLED: bool = False
     MESH_BOOTSTRAP_SIGNER_ID: str = ""
     MESH_PEER_REGISTRY_ENABLED: bool = False
     MESH_PEER_REGISTRY_DISABLED: bool = False

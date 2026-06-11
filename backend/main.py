@@ -1289,10 +1289,14 @@ def _ensure_infonet_private_transport_ready(reason: str = "") -> bool:
 
 
 def _configured_bootstrap_seed_peer_urls() -> list[str]:
+    from services.mesh.mesh_fleet_defaults import configured_bootstrap_seed_peers_with_fleet_default
+
     settings = get_settings()
     primary = str(getattr(settings, "MESH_BOOTSTRAP_SEED_PEERS", "") or "").strip()
     legacy = str(getattr(settings, "MESH_DEFAULT_SYNC_PEERS", "") or "").strip()
-    return parse_configured_relay_peers(primary or legacy)
+    return configured_bootstrap_seed_peers_with_fleet_default(
+        parse_configured_relay_peers(primary or legacy)
+    )
 
 
 def _refresh_node_peer_store(*, now: float | None = None) -> dict[str, Any]:
@@ -9238,7 +9242,33 @@ async def api_set_node_settings(request: Request, body: NodeSettingsUpdate):
     if bool(body.enabled):
         _start_infonet_node_runtime("operator_enable")
         _kick_public_sync_background("operator_enable")
+        threading.Thread(target=_swarm_bootstrap_after_transport_ready, daemon=True).start()
     return result
+
+
+@app.post("/api/mesh/infonet/swarm/join")
+@limiter.limit("10/minute")
+async def infonet_swarm_join(request: Request):
+    """Announce this node to the fleet seed and pull the signed peer manifest."""
+    if not _participant_node_enabled():
+        return {"ok": False, "detail": "participant node is disabled"}
+    if _infonet_private_transport_required() and not _ensure_infonet_private_transport_ready("swarm_join"):
+        return JSONResponse(
+            {"ok": False, "detail": _infonet_private_transport_error()},
+            status_code=503,
+        )
+
+    from services.mesh.mesh_swarm_runtime import announce_local_peer_to_seeds, refresh_swarm_manifest_from_seeds
+
+    announce = await asyncio.to_thread(announce_local_peer_to_seeds, force=True)
+    manifest = await asyncio.to_thread(refresh_swarm_manifest_from_seeds, force=True)
+    if manifest.get("ok"):
+        await asyncio.to_thread(_refresh_node_peer_store)
+    return {
+        "ok": bool(announce.get("ok")) or bool(manifest.get("ok")),
+        "announce": announce,
+        "manifest_pull": manifest,
+    }
 
 
 @app.get("/api/settings/wormhole")

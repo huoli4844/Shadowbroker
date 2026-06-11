@@ -29,9 +29,13 @@ services:
       - CORS_ORIGINS=${CORS_ORIGINS:-}
       # Private Infonet bootstrap seeds. Seeds are discovery hints, not fixed roots.
       - MESH_BOOTSTRAP_SEED_PEERS=${MESH_BOOTSTRAP_SEED_PEERS:-http://gqpbunqbgtkcqilvclm3xrkt3zowjyl3s62kkktvojgvxzizamvbrqid.onion:8000}
+      - MESH_BOOTSTRAP_SIGNER_PUBLIC_KEY=${MESH_BOOTSTRAP_SIGNER_PUBLIC_KEY:-ul1d0kj/ODPIp0OhHzX8eLAVXzJ3CVvzW1vn2IC6q3I=}
+      - MESH_INFONET_FLEET_JOIN=${MESH_INFONET_FLEET_JOIN:-true}
       - MESH_DEFAULT_SYNC_PEERS=${MESH_DEFAULT_SYNC_PEERS:-}
-      - MESH_SYNC_TIMEOUT_S=${MESH_SYNC_TIMEOUT_S:-5}
+      - MESH_SYNC_TIMEOUT_S=${MESH_SYNC_TIMEOUT_S:-45}
       - MESH_RELAY_PUSH_TIMEOUT_S=${MESH_RELAY_PUSH_TIMEOUT_S:-45}
+      - MESH_SYNC_MAX_PEERS_PER_CYCLE=${MESH_SYNC_MAX_PEERS_PER_CYCLE:-5}
+      - MESH_SWARM_MANIFEST_PULL_INTERVAL_S=${MESH_SWARM_MANIFEST_PULL_INTERVAL_S:-300}
       # Explicitly opt into HTTPS/IP-based peer sync. Default remains private transports only.
       - MESH_INFONET_ALLOW_CLEARNET_SYNC=${MESH_INFONET_ALLOW_CLEARNET_SYNC:-false}
       # Tor/Arti SOCKS transport for private .onion Infonet sync.
