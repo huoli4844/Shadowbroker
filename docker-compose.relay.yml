@@ -1,9 +1,7 @@
 # Minimal relay-node compose — backend only, no frontend needed.
 services:
   backend:
-    build:
-      context: .
-      dockerfile: ./backend/Dockerfile
+    image: ghcr.io/bigbodycobain/shadowbroker-backend:latest
     container_name: shadowbroker-relay
     ports:
       - "127.0.0.1:8000:8000"
