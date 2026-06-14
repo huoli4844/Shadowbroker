@@ -4,6 +4,7 @@
 Environment:
   PETE_SSH / REMOTE_PARTICIPANT_SSH — SSH host for remote participant (default: pete)
   E2E_DM_TOR_ONLY=1 — skip disk-inject fallbacks; require Tor replicate-envelope only
+  E2E_DM_DEPLOY_FROM_GIT=1 — remote participant: git pull + compose (no harness SCP patches)
   E2E_DM_FRESH_BACKEND=1 — recreate local lean E2E backend before run
   docker-compose.participant.yml — deploy lean participant on any fleet peer
 """
@@ -36,6 +37,16 @@ FRESH_BACKEND = os.environ.get("E2E_DM_FRESH_BACKEND", "1").strip().lower() not 
 }
 SSH_PETE = os.environ.get("REMOTE_PARTICIPANT_SSH") or os.environ.get("PETE_SSH", "pete")
 TOR_ONLY = os.environ.get("E2E_DM_TOR_ONLY", "0").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
+DEPLOY_FROM_GIT = os.environ.get("E2E_DM_DEPLOY_FROM_GIT", "0").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
+SKIP_REMOTE_PREP = os.environ.get("E2E_DM_SKIP_REMOTE_PREP", "0").strip().lower() not in {
     "0",
     "false",
     "no",
@@ -1549,6 +1560,28 @@ print(json.dumps({{"ok": True, "drained": drained}}))
 
 
 def _restart_pete_backend() -> None:
+    if DEPLOY_FROM_GIT:
+        remote_cmd = (
+            "cd /home/ubuntu/Shadowbroker && "
+            "git fetch origin && git reset --hard origin/main && "
+            "docker compose -f docker-compose.yml -f docker-compose.participant.yml pull && "
+            "docker compose -f docker-compose.yml -f docker-compose.participant.yml up -d && "
+            "sleep 8 && "
+            "docker exec shadowbroker-backend sh -c "
+            "'rm -f /app/data/dm_relay.json /app/data/private_outbox/sealed_private_outbox.json "
+            "/app/data/dm_alias/wormhole_dm_mls.json /app/data/dm_alias_rust/wormhole_dm_mls_rust.bin'"
+        )
+        proc = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", SSH_PETE, remote_cmd],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "remote git deploy failed")
+        time.sleep(int(os.environ.get("E2E_DM_PETE_BOOTSTRAP_WAIT_S", "90")))
+        return
     repo_root = os.path.dirname(os.path.dirname(__file__))
     patch_files = [
         ("backend/services/mesh/mesh_dm_relay.py", "/tmp/mesh_dm_relay.py"),
@@ -2526,21 +2559,24 @@ def main() -> int:
     print("== prep: ensure local lean E2E backend (MESH_ONLY) ==")
     _ensure_local_e2e_backend(recreate=FRESH_BACKEND)
 
-    print("== prep: restart Pete backend (lean participant, responsive API) ==")
-    _restart_pete_backend()
+    if not SKIP_REMOTE_PREP:
+        print("== prep: restart Pete backend (lean participant, responsive API) ==")
+        _restart_pete_backend()
 
-    print("== prep: prime Pete wormhole/Tor ==")
-    pete_runtime: dict = {}
-    for attempt in range(1, 7):
-        pete_runtime = _prime_pete_dm_wormhole()
-        print(json.dumps({"attempt": attempt, **pete_runtime}, indent=2))
-        running = bool((pete_runtime.get("runtime") or {}).get("running"))
-        tier = str((pete_runtime.get("runtime") or {}).get("transport_tier") or "")
-        if running and tier != "public_degraded":
-            break
-        time.sleep(30)
+        print("== prep: prime Pete wormhole/Tor ==")
+        pete_runtime: dict = {}
+        for attempt in range(1, 7):
+            pete_runtime = _prime_pete_dm_wormhole()
+            print(json.dumps({"attempt": attempt, **pete_runtime}, indent=2))
+            running = bool((pete_runtime.get("runtime") or {}).get("running"))
+            tier = str((pete_runtime.get("runtime") or {}).get("transport_tier") or "")
+            if running and tier != "public_degraded":
+                break
+            time.sleep(30)
+        else:
+            raise RuntimeError(f"Pete wormhole did not become ready: {pete_runtime}")
     else:
-        raise RuntimeError(f"Pete wormhole did not become ready: {pete_runtime}")
+        print("== prep: skip remote restart (E2E_DM_SKIP_REMOTE_PREP=1) ==")
 
     print("== warmup: prime Tor to Pete ==")
     _warmup_tor()
